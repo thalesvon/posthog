@@ -615,7 +615,7 @@ export const visionScannersCreateBodyExperimentTargetingOneVariantMax = 400
 
 export const visionScannersCreateBodyScopeOneVariantsItemMax = 400
 
-export const visionScannersCreateBodyScopeOneVariantsMax = 128
+export const visionScannersCreateBodyScopeOneVariantsSourceDefault = `user`
 
 export const VisionScannersCreateBody = /* @__PURE__ */ zod
     .object({
@@ -771,23 +771,22 @@ export const VisionScannersCreateBody = /* @__PURE__ */ zod
                             .describe('The experiment whose exposed sessions the scanner watches.'),
                         variants: zod
                             .array(zod.string().max(visionScannersCreateBodyScopeOneVariantsItemMax))
-                            .max(visionScannersCreateBodyScopeOneVariantsMax)
                             .optional()
                             .describe(
-                                'Every variant the scanner watches, named explicitly, with no repeats. Read them from the experiment first, because a variant added to the experiment later is not watched until it is added here. Absent only on a scope carried over from the older targeting shapes, which watches every variant.'
+                                'Every variant the scanner watches. Absent only on a scanner still carrying a scope derived from the older targeting shapes, which could mean every variant.'
                             ),
                         variants_source: zod
                             .enum(['all_at_creation', 'user'])
                             .describe(
                                 '\* `all_at_creation` - Every variant the experiment had when the scanner was made\n\* `user` - A subset someone picked'
                             )
-                            .optional()
+                            .default(visionScannersCreateBodyScopeOneVariantsSourceDefault)
                             .describe(
                                 "Whether `variants` was the experiment's full variant set when the scanner was made, or a subset someone picked. The launch receiver adds new variants only to the first.\n\n\* `all_at_creation` - Every variant the experiment had when the scanner was made\n\* `user` - A subset someone picked"
                             ),
                     })
                     .describe(
-                        'An experiment scope: the sessions of people exposed to an experiment, labeled by variant.'
+                        'What a read of `scope` can actually return, which is wider than what a write accepts.\n\nA scope the mirror derived from an older store carries no `variants` when that store watched\nevery variant: both older shapes could leave the variant unset, and `as_stored()` drops a None.\nWrites still require it, so only the response schema is widened; the backfill that gives every\nrow an explicit variant list retires this difference.'
                     ),
                 zod.null(),
                 zod.null(),
@@ -822,7 +821,7 @@ export const visionScannersPartialUpdateBodyExperimentTargetingOneVariantMax = 4
 
 export const visionScannersPartialUpdateBodyScopeOneVariantsItemMax = 400
 
-export const visionScannersPartialUpdateBodyScopeOneVariantsMax = 128
+export const visionScannersPartialUpdateBodyScopeOneVariantsSourceDefault = `user`
 
 export const VisionScannersPartialUpdateBody = /* @__PURE__ */ zod
     .object({
@@ -982,23 +981,22 @@ export const VisionScannersPartialUpdateBody = /* @__PURE__ */ zod
                             .describe('The experiment whose exposed sessions the scanner watches.'),
                         variants: zod
                             .array(zod.string().max(visionScannersPartialUpdateBodyScopeOneVariantsItemMax))
-                            .max(visionScannersPartialUpdateBodyScopeOneVariantsMax)
                             .optional()
                             .describe(
-                                'Every variant the scanner watches, named explicitly, with no repeats. Read them from the experiment first, because a variant added to the experiment later is not watched until it is added here. Absent only on a scope carried over from the older targeting shapes, which watches every variant.'
+                                'Every variant the scanner watches. Absent only on a scanner still carrying a scope derived from the older targeting shapes, which could mean every variant.'
                             ),
                         variants_source: zod
                             .enum(['all_at_creation', 'user'])
                             .describe(
                                 '\* `all_at_creation` - Every variant the experiment had when the scanner was made\n\* `user` - A subset someone picked'
                             )
-                            .optional()
+                            .default(visionScannersPartialUpdateBodyScopeOneVariantsSourceDefault)
                             .describe(
                                 "Whether `variants` was the experiment's full variant set when the scanner was made, or a subset someone picked. The launch receiver adds new variants only to the first.\n\n\* `all_at_creation` - Every variant the experiment had when the scanner was made\n\* `user` - A subset someone picked"
                             ),
                     })
                     .describe(
-                        'An experiment scope: the sessions of people exposed to an experiment, labeled by variant.'
+                        'What a read of `scope` can actually return, which is wider than what a write accepts.\n\nA scope the mirror derived from an older store carries no `variants` when that store watched\nevery variant: both older shapes could leave the variant unset, and `as_stored()` drops a None.\nWrites still require it, so only the response schema is widened; the backfill that gives every\nrow an explicit variant list retires this difference.'
                     ),
                 zod.null(),
                 zod.null(),
