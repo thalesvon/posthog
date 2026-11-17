@@ -575,10 +575,12 @@ tools:
             for search), or `experiment` (legacy, see below) — and fill `scanner_config` to match: all types need a
             `prompt`; monitors optionally set `allow_inconclusive`; classifiers also need `tags` (and optionally
             `multi_label`, `allow_freeform_tags`); scorers also need `scale`; summarizers optionally set `length`.
-            Unknown `scanner_config` keys are rejected. `query` is a `RecordingsQuery` shape that defines which sessions the scanner watches — `date_from`
+            Unknown `scanner_config` keys are rejected. `query` is a `RecordingsQuery` shape that defines which
+            sessions the scanner watches — `date_from`
             and `date_to` are ignored (the schedule controls time). `sampling_rate` is a 0..1 random downsample of the
             matched sessions (default 1.0). `model` chooses the LLM and sets the credit price of every
-            observation. Names must be unique within the team. Before creating a broad scanner (a permissive `query` and/or high
+            observation. Names must be unique within the team. Before creating a broad scanner (a permissive `query`
+            and/or high
             `sampling_rate`), first call `vision-scanners-estimate` to project its
             monthly credit spend and `vision-quota-get` to check the org's remaining budget — an enabled scanner sweeps
             matching recordings as often as every 5 minutes, and creation itself does not check quota, so a too-broad
@@ -596,7 +598,8 @@ tools:
             of `query`: the API derives the person-scoped exposure filter server-side, and rejects an
             `experiment_exposure` filter set directly in `query`. `experiment_targeting` is legacy; don't set it. Pass
             the same `experiment_id` and `variants` to `vision-scanners-estimate` as `experiment`, so the estimate
-            counts only exposed sessions. Read the results per variant with `vision-scanners-variants-list`. Create with `enabled: false`, so you can preview the
+            counts only exposed sessions. Read the results per variant with `vision-scanners-variants-list`. Create
+            with `enabled: false`, so you can preview the
             prompt on real sessions first. The `scanning-experiments-with-replay-vision` skill carries the full flow
             (status guards, prompt templates, sizing). It is a built-in PostHog skill, not a team skill in the skills
             store, so do not fetch it with `skill-get`. Load it with `learn
@@ -1086,12 +1089,15 @@ tools:
         description: >
             Partially update a replay vision scanner by ID. Send only the fields you want to change, except `query`: it
             replaces the stored filter as a whole, so read it with `vision-scanners-get` and send it back in full with
-            your changes. Common changes: toggle `enabled` to pause/resume scanning, adjust `sampling_rate`, tweak the `scanner_config` prompt or tags, or refine the `query` to watch a different slice
+            your changes. Common changes: toggle `enabled` to pause/resume scanning, adjust `sampling_rate`, tweak the
+            `scanner_config` prompt or tags, or refine the `query` to watch a different slice
             of sessions. `scanner_type` is locked after creation — to change it, delete and recreate. A scanner's
             `scope` can be narrowed or widened by sending `scope` with a different `variants` list, but its `kind` and
             `experiment_id` are fixed after creation: to watch a different experiment, make a new scanner. Send either
             `scope` or `experiment_targeting`, never both. Editing any config field bumps `scanner_version`; existing
-            observations keep a snapshot of the previous config for reproducibility. If you widen the `query`, raise `sampling_rate`, or move to a pricier `model`, re-check projected spend with `vision-scanners-estimate` and remaining budget with
+            observations keep a snapshot of the previous config for reproducibility. If you widen the `query`, raise
+            `sampling_rate`, or move to a pricier `model`, re-check projected spend with `vision-scanners-estimate`
+            and remaining budget with
             `vision-quota-get` first — the scanner resumes sweeping as often as every 5 minutes at the new, broader
             scope.
         exclude_params:
