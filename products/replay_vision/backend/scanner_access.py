@@ -156,8 +156,15 @@ def snapshot_experiment_scope_q(
         q |= Q(**{f"{targeting}__isnull": True, f"{config}__isnull": True, f"{scope}__isnull": True})
     ids = list(experiment_ids)
     if ids:
+        # Every store that names an experiment must name an accessible one. The three can disagree
+        # while a row still carries a scope the mirror has not caught up with, and an OR would let
+        # the readable store of such a row unlock what the others restrict.
         # nosemgrep: orm-field-injection (all three paths are fixed strings; prefix is allowlisted above)
-        q |= Q(**{f"{targeting}__in": ids}) | Q(**{f"{config}__in": ids}) | Q(**{f"{scope}__in": ids})
+        named = Q(**{f"{targeting}__in": ids}) | Q(**{f"{config}__in": ids}) | Q(**{f"{scope}__in": ids})
+        for path in (targeting, config, scope):
+            # nosemgrep: orm-field-injection (all three paths are fixed strings; prefix is allowlisted above)
+            named &= Q(**{f"{path}__isnull": True}) | Q(**{f"{path}__in": ids})
+        q |= named
     return q
 
 
@@ -190,7 +197,8 @@ def can_read_observation(access: UserAccessControl, team_id: int, observation: "
         for store in ("experiment_targeting", "scanner_config", "scope")
         if (experiment_id := (snapshot.get(store) or {}).get("experiment_id")) is not None
     }
-    return not experiment_ids or bool(accessible_experiment_ids(access, team_id, experiment_ids) & experiment_ids)
+    # Every named experiment must be accessible, for the reason in `snapshot_experiment_scope_q`.
+    return not experiment_ids or accessible_experiment_ids(access, team_id, experiment_ids) >= experiment_ids
 
 
 def readable_observation_scanner_ids(access: UserAccessControl, team_id: int) -> list[uuid.UUID]:
