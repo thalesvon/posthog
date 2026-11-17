@@ -7,7 +7,7 @@ from django.utils import timezone
 import structlog
 from posthoganalytics import capture_exception
 from pydantic import BaseModel, Field
-from rest_framework.exceptions import Throttled
+from rest_framework.exceptions import Throttled, ValidationError
 
 from posthog.schema import MaxRecordingUniversalFilters
 
@@ -47,6 +47,7 @@ from products.replay_vision.backend.quota import compute_quota_snapshot, quota_s
 from products.replay_vision.backend.scanner_access import (
     accessible_observations,
     can_read_targeted_experiment,
+    is_experiment_accessible,
     is_uuid,
     readable_observation_scanner_ids,
     scanner_for_reading_observations,
@@ -1532,10 +1533,20 @@ class CreateReplayVisionScannerTool(ReplayVisionGatesMixin, MaxTool):
         if experiment_id is not None and scope_api_enabled(self._team, self._user):
             if resolved_type == ScannerType.EXPERIMENT:
                 resolved_type = ScannerType.SUMMARIZER
+            # Filling the variants resolves the linkage, which runs before the serializer's own
+            # access check, so a denied id would resolve and disclose that the experiment exists.
+            if not is_experiment_accessible(self.user_access_control, self._team.id, experiment_id):
+                return "Experiment not found.", {"error": "invalid_config"}
+            try:
+                scope_variants = variants or _experiment_variant_keys(self._team, experiment_id)
+            except ValidationError as e:
+                # The linkage refuses a draft or rule-linked experiment. Raised outside the
+                # serializer, so nothing below turns it into an answer.
+                return _first_error(e.detail), {"error": "invalid_config"}
             scope = {
                 "kind": "experiment",
                 "experiment_id": experiment_id,
-                "variants": variants or _experiment_variant_keys(self._team, experiment_id),
+                "variants": scope_variants,
             }
             experiment_id = None
         # Through the serializer, not ReplayScanner.objects.create: it owns the sampling-rate floor below

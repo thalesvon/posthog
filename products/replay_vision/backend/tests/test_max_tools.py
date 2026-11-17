@@ -961,6 +961,47 @@ class TestCreateReplayVisionScannerTool(BaseTest):
 
     @pytest.mark.django_db
     @pytest.mark.asyncio
+    async def test_an_unresolvable_experiment_reads_as_rejected_config(self):
+        experiment = await sync_to_async(create_experiment)(
+            self.team, "max-unlaunched", launched=False, variants=["control", "test"]
+        )
+
+        with patch("products.replay_vision.backend.scope.flag.posthoganalytics.feature_enabled", return_value=True):
+            message, artifact = await self._tool()._arun_impl(
+                name="unlaunched-by-max",
+                prompt="Why did they leave?",
+                scanner_type="experiment",
+                experiment_id=experiment.id,
+            )
+
+        assert artifact == {"error": "invalid_config"}
+        assert message
+        assert not await sync_to_async(ReplayScanner.objects.filter(name="unlaunched-by-max").exists)()
+
+    @pytest.mark.django_db
+    @pytest.mark.asyncio
+    async def test_an_experiment_the_caller_cannot_view_reads_as_not_found(self):
+        experiment = await sync_to_async(create_experiment)(
+            self.team, "max-denied", launched=True, variants=["control", "test"]
+        )
+
+        with (
+            patch("products.replay_vision.backend.scope.flag.posthoganalytics.feature_enabled", return_value=True),
+            patch("products.replay_vision.backend.max_tools.is_experiment_accessible", return_value=False),
+        ):
+            message, artifact = await self._tool()._arun_impl(
+                name="denied-by-max",
+                prompt="Why did they leave?",
+                scanner_type="experiment",
+                experiment_id=experiment.id,
+            )
+
+        # The same wording a nonexistent id gets, so a denied experiment cannot be told from a missing one.
+        assert artifact == {"error": "invalid_config"}
+        assert message == "Experiment not found."
+
+    @pytest.mark.django_db
+    @pytest.mark.asyncio
     async def test_without_the_flag_an_experiment_stays_the_legacy_type(self):
         experiment = await sync_to_async(create_experiment)(
             self.team, "max-legacy", launched=True, variants=["control"]
