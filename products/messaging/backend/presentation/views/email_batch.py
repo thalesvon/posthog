@@ -189,6 +189,7 @@ EMAIL_BATCH_RESPONSES: dict[int, ResponseDeclaration] = {
     ),
     404: OpenApiResponse(description="Template not found, or batch sends aren't available for this project"),
     413: OpenApiResponse(description="The request body is over 5 MiB"),
+    415: OpenApiResponse(description="The request body isn't JSON"),
     429: OpenApiResponse(description="The batch would go over the send rate limit, so nothing was sent"),
     503: OpenApiResponse(description="The email pipeline did not confirm the batch. Some of its emails may go out"),
 }

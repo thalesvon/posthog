@@ -9,6 +9,7 @@ from django.core.cache import cache
 
 import requests
 from parameterized import parameterized
+from requests.structures import CaseInsensitiveDict
 from rest_framework import status
 from rest_framework.test import APIClient
 
@@ -201,11 +202,12 @@ class TestTransactionalEmailBatch(APIBaseTest):
             match = re.fullmatch(r"(\d+)/hog_flows/([^/]+)/transactional_email(.*)", path)
             assert match is not None
             team_id, hog_flow_id, route = match.groups()
-            scheme, token = call.kwargs["headers"]["Authorization"].split(" ", 1)
+            headers = CaseInsensitiveDict(call.kwargs["headers"])
+            scheme, token = headers["Authorization"].split(" ", 1)
             assert scheme == "Bearer"
             claims = WORKFLOWS_TRANSACTIONAL_EMAIL_JWT_PURPOSE.verify(token)
             assert (claims["team_id"], claims["hog_flow_id"]) == (int(team_id), hog_flow_id)
-            assert call.kwargs["headers"].get("Content-Encoding", "identity") == "identity"
+            assert headers.get("Content-Encoding", "identity") == "identity"
             forwards.append((route, claims.get("kind")))
         assert forwards == [
             ("", None),
@@ -313,10 +315,18 @@ class TestTransactionalEmailBatch(APIBaseTest):
         assert response.status_code == status.HTTP_200_OK, response.json()
         assert [result["status"] for result in response.json()["results"]] == ["queued"] * count
 
-    def test_refuses_a_form_encoded_batch(self, mock_post, _flag, _capture):
-        response = self.psak.post(
+    def _form_encoded_batch(self) -> Any:
+        return self.psak.post(
             BATCH_URL, {"template_id": str(self.template.id), "recipients[0]to": "a@example.com"}, format="multipart"
         )
+
+    @parameterized.expand([("form_encoded", None), ("wildcard_subtype", "application/*"), ("wildcard", "*/*")])
+    def test_refuses_a_batch_whose_body_is_not_named_json(self, mock_post, _flag, _capture, _name, content_type):
+        if content_type is None:
+            response = self._form_encoded_batch()
+        else:
+            body = {**self._email("template"), "recipients": self._recipients(2)}
+            response = self.psak.post(BATCH_URL, json.dumps(body), content_type=content_type)
 
         assert response.status_code == status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, response.json()
         mock_post.assert_not_called()
@@ -464,6 +474,7 @@ class TestTransactionalEmailBatch(APIBaseTest):
     @parameterized.expand(
         [
             ("batch_flag_off", "template", {TRANSACTIONAL_EMAIL_API_FLAG, EMAIL_FROM_CODE_FLAG}),
+            ("batch_flag_off_form_encoded", "form", {TRANSACTIONAL_EMAIL_API_FLAG, EMAIL_FROM_CODE_FLAG}),
             ("template_flag_off", "template", {EMAIL_BATCH_FLAG, EMAIL_FROM_CODE_FLAG}),
             ("code_flag_off", "code", {EMAIL_BATCH_FLAG, TRANSACTIONAL_EMAIL_API_FLAG}),
         ]
@@ -471,7 +482,7 @@ class TestTransactionalEmailBatch(APIBaseTest):
     def test_is_hidden_while_a_flag_it_needs_is_off(self, mock_post, flag, _capture, _name, form, enabled_flags):
         flag.side_effect = lambda key, *_args, **_kwargs: key in enabled_flags
 
-        response = self._batch(form)
+        response = self._form_encoded_batch() if form == "form" else self._batch(form)
 
         assert response.status_code == status.HTTP_404_NOT_FOUND
         mock_post.assert_not_called()

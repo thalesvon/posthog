@@ -10,7 +10,6 @@ from rest_framework.decorators import action
 from rest_framework.exceptions import UnsupportedMediaType
 from rest_framework.parsers import JSONParser
 from rest_framework.response import Response
-from rest_framework.utils.mediatypes import media_type_matches
 
 from posthog.rate_limit import reserve_units
 
@@ -55,11 +54,6 @@ class KeyScopedMessagingSendViewSet(MessagingSendViewSet):
     psak_allowed_actions = ["email", "email_batch"]
     transactional_email_send_actions = ("email", "email_batch")
 
-    def initial(self, request: Any, *args: Any, **kwargs: Any) -> None:
-        super().initial(request, *args, **kwargs)
-        if self.action == "email_batch" and not media_type_matches(JSONParser.media_type, request.content_type):
-            raise UnsupportedMediaType(request.content_type)
-
     @extend_schema(
         request=SendEmailBatchSerializer,
         responses=EMAIL_BATCH_RESPONSES,
@@ -78,11 +72,14 @@ class KeyScopedMessagingSendViewSet(MessagingSendViewSet):
         detail=False, methods=["POST"], parser_classes=[JSONParser], required_scopes=[TRANSACTIONAL_EMAIL_SEND_SCOPE]
     )
     def email_batch(self, request: Any, *args: Any, **kwargs: Any) -> Response:
-        body_bytes = len(request.body)
         batch_id = str(uuid4())
         self._batch_properties = {"batch_id": batch_id}
         with transactional_email_stage("feature_flag"):
             require_email_batch_sends(self.team)
+        if request.content_type.split(";")[0].strip().lower() != JSONParser.media_type:
+            raise UnsupportedMediaType(request.content_type)
+        body_bytes = len(request.body)
+        with transactional_email_stage("feature_flag"):
             takes_template_key = isinstance(request.data, Mapping) and "template_key" in request.data
             (require_email_from_code if takes_template_key else require_transactional_email_api)(self.team)
         if refusal := refused_batch_field(request.data, takes_template_key=takes_template_key):
