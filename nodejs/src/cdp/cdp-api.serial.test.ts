@@ -5679,8 +5679,6 @@ describe('CDP API', () => {
                 ])(
                     'refuses a request to %s%s over the request cap before it parses the body, with only its batch token',
                     async (route, suffix) => {
-                        // An app-wide parser answers a body over its limit before any route runs, so only a request
-                        // admitted ahead of that parser reaches the capacity check.
                         const { app: full } = await servedWith(
                             { CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_REQUESTS: 0 },
                             { jsonBodyLimit: '1kb', internalApiSecret: 'shared-secret' }

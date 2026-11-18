@@ -41,8 +41,7 @@ const SCOPED_AUTH_PATH_PATTERNS = [
     // CdpApi.postTransactionalEmail, verified against WORKFLOWS_TRANSACTIONAL_EMAIL_JWT_SECRET, audience-pinned.
     /^\/api\/projects\/[^/]+\/hog_flows\/[^/]+\/transactional_email$/,
     /^\/api\/projects\/[^/]+\/hog_flows\/[^/]+\/transactional_email\/send$/,
-    // CdpApi.postTransactionalEmailBatch, the same key and audience, each route pinned to its own token kind. Express
-    // routes the trailing-slash form to the same handler, and the body parser skips it too, so both forms match here.
+    // CdpApi.postTransactionalEmailBatch, one token kind per route, which Express also serves with a trailing slash.
     /^\/api\/projects\/[^/]+\/hog_flows\/[^/]+\/transactional_email\/batch\/?$/,
     /^\/api\/projects\/[^/]+\/hog_flows\/[^/]+\/transactional_email\/send\/batch\/?$/,
     /^\/api\/projects\/[^/]+\/transactional_email\/attachments\/uploads$/,
