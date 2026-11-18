@@ -1,3 +1,5 @@
+import { z } from "zod";
+
 export interface RunPolicy {
   readonly finishTool: boolean;
   /** A workflow run that opts into `finish` hands its report to the next step. */
@@ -13,6 +15,38 @@ export interface RunPolicyInput {
   readonly originProduct: string | null | undefined;
   readonly endRunWhenDone: boolean;
   readonly callerEndsRun: boolean;
+}
+
+const serverRunPolicySchema = z.object({
+  finish_tool: z.boolean(),
+  finish_report_required: z.boolean(),
+  report_activity_tool: z.boolean(),
+  branch_push_only: z.boolean(),
+  expects_system_prompt: z.boolean(),
+  thread_link: z.boolean(),
+  default_client_provenance: z.string().nullable(),
+});
+
+export function parseServerRunPolicy(raw: string): RunPolicy | undefined {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  const parsed = serverRunPolicySchema.safeParse(payload);
+  if (!parsed.success) {
+    return undefined;
+  }
+  return {
+    finishTool: parsed.data.finish_tool,
+    finishReportRequired: parsed.data.finish_report_required,
+    reportActivityTool: parsed.data.report_activity_tool,
+    branchPushOnly: parsed.data.branch_push_only,
+    expectsSystemPrompt: parsed.data.expects_system_prompt,
+    threadLink: parsed.data.thread_link,
+    defaultClientProvenance: parsed.data.default_client_provenance ?? undefined,
+  };
 }
 
 const CALLER_ENDS_RUN_ORIGINS = new Set(["review_hog", "scout_suggestions"]);

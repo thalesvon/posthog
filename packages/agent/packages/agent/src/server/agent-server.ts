@@ -2230,6 +2230,12 @@ export class AgentServer {
     const launch = readRunLaunch(launchSources);
     this.taskRepositories = launch.repositories;
     this.branchPushOnly = launch.policy.branchPushOnly;
+    if (launch.policySource !== "server") {
+      this.logger.warn("run_policy_not_from_server", {
+        runId: payload.run_id,
+        source: launch.policySource,
+      });
+    }
 
     this.runUsage = new RunUsageAccumulator();
     this.runUsageRunId = payload.run_id;
