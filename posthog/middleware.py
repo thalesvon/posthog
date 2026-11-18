@@ -1704,6 +1704,7 @@ class SocialAuthExceptionMiddleware:
                 "google_sso_enforced",
                 "github_sso_enforced",
                 "gitlab_sso_enforced",
+                "chatgpt_sso_enforced",
                 "sso_enforced",
                 "reauth_user_mismatch",
                 "access_blocked",

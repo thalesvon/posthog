@@ -3,7 +3,9 @@ import { useValues } from 'kea'
 import { LemonSelect, LemonSelectOptions } from '@posthog/lemon-ui'
 
 import { SocialLoginIcon } from 'lib/components/SocialLoginButton/SocialLoginIcon'
+import { isSocialProviderHeldBack } from 'lib/components/SocialLoginButton/socialProviderRollout'
 import { SSO_PROVIDER_NAMES } from 'lib/constants'
+import { featureFlagLogic } from 'lib/logic/featureFlagLogic'
 import { preflightLogic } from 'lib/logic/preflightLogic'
 
 import { SSOProvider } from '~/types'
@@ -26,12 +28,15 @@ export function SSOSelect({
     disabledReason,
 }: SSOSelectInterface): JSX.Element | null {
     const { preflight } = useValues(preflightLogic)
+    const { featureFlags } = useValues(featureFlagLogic)
 
     if (!preflight) {
         return null
     }
 
-    const authProviders = Object.keys(preflight.available_social_auth_providers) as SSOProvider[]
+    const authProviders = (Object.keys(preflight.available_social_auth_providers) as SSOProvider[]).filter(
+        (provider) => provider === value || !isSocialProviderHeldBack(provider, featureFlags)
+    )
     const options: LemonSelectOptions<SSOProvider | ''> = [{ value: '', label: "Don't enforce" }]
 
     authProviders.forEach((key) => {
