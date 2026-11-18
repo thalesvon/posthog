@@ -23,13 +23,28 @@ const BatchRecipient = z.object({ to: z.unknown(), distinct_id: z.unknown(), ide
 const hasUniqueKeys = (recipients: { idempotency_key: string }[]): boolean =>
     new Set(recipients.map((recipient) => recipient.idempotency_key)).size === recipients.length
 
-// The length is checked before any recipient, so an oversized list costs one issue, not one per entry.
+// Zod reads every entry of an array before it checks the array's length. The length is checked on the raw value
+// first, so an oversized list costs one issue and no pass over its entries.
 const recipientsOf = <T extends { idempotency_key: string }>(recipient: z.ZodType<T>) =>
     z
-        .array(z.unknown())
-        .min(1)
-        .max(BATCH_MAX_RECIPIENTS)
-        .pipe(z.array(recipient).refine(hasUniqueKeys, { message: 'idempotency_key must be unique within a batch' }))
+        .unknown()
+        .check((ctx) => {
+            if (Array.isArray(ctx.value) && ctx.value.length > BATCH_MAX_RECIPIENTS) {
+                ctx.issues.push({
+                    code: 'too_big',
+                    origin: 'array',
+                    maximum: BATCH_MAX_RECIPIENTS,
+                    inclusive: true,
+                    input: ctx.value,
+                })
+            }
+        })
+        .pipe(
+            z
+                .array(recipient)
+                .min(1)
+                .refine(hasUniqueKeys, { message: 'idempotency_key must be unique within a batch' })
+        )
 
 // What Django sends to run one email for many recipients. Strict, so a field a batch never takes (a send time, copies,
 // attachments) refuses the whole call instead of reaching a recipient's run.

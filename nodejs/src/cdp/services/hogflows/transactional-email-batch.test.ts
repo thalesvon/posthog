@@ -148,9 +148,21 @@ describe('BatchCapacity', () => {
 })
 
 describe('TemplateBatchRequestSchema', () => {
-    it('refuses a recipient list over the cap with one issue, before it checks any recipient', () => {
-        const parsed = TemplateBatchRequestSchema.safeParse({ recipients: Array.from({ length: 1000 }, () => ({})) })
+    it('refuses a recipient list over the cap with one issue, without reading any recipient', () => {
+        const recipients: unknown[] = Array.from({ length: 1000 }, () => ({}))
+        let reads = 0
+        recipients.forEach((recipient, index) =>
+            Object.defineProperty(recipients, index, {
+                get: () => {
+                    reads++
+                    return recipient
+                },
+            })
+        )
+
+        const parsed = TemplateBatchRequestSchema.safeParse({ recipients })
 
         expect(parsed.error?.issues).toEqual([expect.objectContaining({ code: 'too_big', path: ['recipients'] })])
+        expect(reads).toBe(0)
     })
 })
