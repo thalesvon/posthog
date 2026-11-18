@@ -227,6 +227,10 @@ export type CdpConfig = ClickhouseConfig & {
     // each run itself and only measures the produce. Async answers on the broker's ack. Async wins over shadow.
     CDP_INTAKE_KAFKA_SHADOW_TEAMS: string
     CDP_INTAKE_KAFKA_ASYNC_TEAMS: string
+    // Per pod: batch email requests in flight, and batch recipients sending at once across them. A request over the
+    // first cap is refused before its body is parsed; a recipient over the second waits for a free slot.
+    CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_REQUESTS: number
+    CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_SLOTS: number
     // Replay worker. Scaled to zero replicas; an operator scales it up to drain the topic.
     CDP_DLQ_REPLAY_TOPIC: string
 
@@ -536,6 +540,8 @@ export function getDefaultCdpConfig(): CdpConfig {
         CDP_INTAKE_PRODUCER: WARPSTREAM_CYCLOTRON_INTAKE_PRODUCER,
         CDP_INTAKE_KAFKA_SHADOW_TEAMS: '',
         CDP_INTAKE_KAFKA_ASYNC_TEAMS: '',
+        CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_REQUESTS: 8,
+        CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_SLOTS: 100,
         CDP_DLQ_REPLAY_TOPIC: KAFKA_CDP_EVENTS_DLQ,
 
         CDP_EMAIL_TRACKING_URL: 'http://localhost:8010',

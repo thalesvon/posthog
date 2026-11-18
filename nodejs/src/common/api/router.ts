@@ -41,6 +41,14 @@ export interface SetupExpressAppOptions {
 
 const READ_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
 
+// Routes that admit a request before they parse its body, so a pod at capacity refuses it without parsing it. Each one
+// parses its own body after admission. Anchored to exactly one route each, like the scoped-auth patterns.
+const ROUTE_PARSED_BODY_PATTERNS = [
+    // CdpApi.postTransactionalEmailBatch
+    /^\/api\/projects\/[^/]+\/hog_flows\/[^/]+\/transactional_email\/batch$/,
+    /^\/api\/projects\/[^/]+\/hog_flows\/[^/]+\/transactional_email\/send\/batch$/,
+]
+
 export function setupCommonRoutes(
     app: express.Application,
     services: Pick<PluginServerService, 'id' | 'healthcheck' | 'readinessCheck'>[]
@@ -87,13 +95,14 @@ export function setupExpressApp(options: SetupExpressAppOptions = {}): express.A
         })
     }
 
-    app.use(
-        express.json({
-            limit: options.jsonBodyLimit ?? '20mb',
-            verify: (req, res, buf) => {
-                ;(req as any).rawBody = buf.toString('utf8')
-            },
-        })
+    const parseJson = express.json({
+        limit: options.jsonBodyLimit ?? '20mb',
+        verify: (req, res, buf) => {
+            ;(req as any).rawBody = buf.toString('utf8')
+        },
+    })
+    app.use((req: Request, res: Response, next: NextFunction) =>
+        ROUTE_PARSED_BODY_PATTERNS.some((pattern) => pattern.test(req.path)) ? next() : parseJson(req, res, next)
     )
 
     // ultimate-express reports an oversized body as a plain Error with no

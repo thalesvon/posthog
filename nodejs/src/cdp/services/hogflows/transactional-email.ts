@@ -137,72 +137,74 @@ const attachmentHeaderValue = (field: string, maxLength: number) => {
         .optional()
 }
 
-export const AcceptedSendSchema = z
-    .object({
-        content: z
-            .object({
-                subject: z.string().min(1),
-                html: z.string().optional(),
-                text: z.string().optional(),
-            })
-            .strict()
-            .readonly()
-            .refine((content) => !!content.html || !!content.text, { message: 'content needs html or text' })
-            .optional(),
-        from: z
-            .object({
-                integrationId: z.number().int(),
-                email: z.string().optional(),
-                name: z.string().optional(),
-            })
-            .strict()
-            .readonly()
-            .optional(),
-        replyTo: z.array(z.string()).readonly().optional(),
-        cc: CopyRecipientsSchema,
-        bcc: CopyRecipientsSchema,
-        sensitive: z.boolean().optional(),
-        tracking: z
-            .object({
-                captureEngagement: z.boolean(),
-                opens: z.literal(false).optional(),
-                clicks: z.boolean().optional(),
-            })
-            .strict()
-            .readonly()
-            .refine((tracking) => !(tracking.opens === false && tracking.clicks === true), {
-                message: 'click tracking needs open tracking',
-            }),
-        attachments: z
-            .array(
-                z
-                    .object({
-                        sha256: z.string().regex(SHA256_HEX),
-                        filename: z
-                            .string()
-                            .min(1)
-                            .max(ATTACHMENT_FILENAME_MAX_LENGTH, {
-                                message: `filename can be at most ${ATTACHMENT_FILENAME_MAX_LENGTH} characters`,
-                            })
-                            .refine(...withoutControlCharacters('filename'))
-                            .refine((filename) => !SES_UNSUPPORTED_ATTACHMENT_EXTENSIONS.has(lastExtension(filename)), {
-                                error: (issue) => {
-                                    const filename = String(issue.input)
-                                    return `SES does not send ${lastExtension(filename)} files, so ${filename} cannot be attached`
-                                },
-                            }),
-                        content_type: attachmentHeaderValue('content_type', ATTACHMENT_CONTENT_TYPE_MAX_LENGTH),
-                        content_id: attachmentHeaderValue('content_id', ATTACHMENT_CONTENT_ID_MAX_LENGTH),
-                    })
-                    .strict()
-                    .readonly()
-            )
-            .max(MAX_EMAIL_ATTACHMENTS)
-            .readonly()
-            .optional(),
-    })
-    .strict()
-    .readonly()
+const AcceptedSendFields = z.object({
+    content: z
+        .object({
+            subject: z.string().min(1),
+            html: z.string().optional(),
+            text: z.string().optional(),
+        })
+        .strict()
+        .readonly()
+        .refine((content) => !!content.html || !!content.text, { message: 'content needs html or text' })
+        .optional(),
+    from: z
+        .object({
+            integrationId: z.number().int(),
+            email: z.string().optional(),
+            name: z.string().optional(),
+        })
+        .strict()
+        .readonly()
+        .optional(),
+    replyTo: z.array(z.string()).readonly().optional(),
+    cc: CopyRecipientsSchema,
+    bcc: CopyRecipientsSchema,
+    sensitive: z.boolean().optional(),
+    tracking: z
+        .object({
+            captureEngagement: z.boolean(),
+            opens: z.literal(false).optional(),
+            clicks: z.boolean().optional(),
+        })
+        .strict()
+        .readonly()
+        .refine((tracking) => !(tracking.opens === false && tracking.clicks === true), {
+            message: 'click tracking needs open tracking',
+        }),
+    attachments: z
+        .array(
+            z
+                .object({
+                    sha256: z.string().regex(SHA256_HEX),
+                    filename: z
+                        .string()
+                        .min(1)
+                        .max(ATTACHMENT_FILENAME_MAX_LENGTH, {
+                            message: `filename can be at most ${ATTACHMENT_FILENAME_MAX_LENGTH} characters`,
+                        })
+                        .refine(...withoutControlCharacters('filename'))
+                        .refine((filename) => !SES_UNSUPPORTED_ATTACHMENT_EXTENSIONS.has(lastExtension(filename)), {
+                            error: (issue) => {
+                                const filename = String(issue.input)
+                                return `SES does not send ${lastExtension(filename)} files, so ${filename} cannot be attached`
+                            },
+                        }),
+                    content_type: attachmentHeaderValue('content_type', ATTACHMENT_CONTENT_TYPE_MAX_LENGTH),
+                    content_id: attachmentHeaderValue('content_id', ATTACHMENT_CONTENT_ID_MAX_LENGTH),
+                })
+                .strict()
+                .readonly()
+        )
+        .max(MAX_EMAIL_ATTACHMENTS)
+        .readonly()
+        .optional(),
+})
+
+export const AcceptedSendSchema = AcceptedSendFields.strict().readonly()
+
+// A batch sends one email to many recipients, so it carries no copies, attachments or send time.
+export const BatchSendSchema = AcceptedSendFields.omit({ cc: true, bcc: true, attachments: true }).strict().readonly()
 
 export type AcceptedSend = z.infer<typeof AcceptedSendSchema>
 
@@ -296,8 +298,8 @@ export type TransactionalEmailOutcome =
 
 export const transactionalEmailRequestsTotal = new Counter({
     name: 'cdp_transactional_email_requests_total',
-    help: 'Requests from Django to run a transactional email, by outcome. Every outcome except `queued` means this request queued no email.',
-    labelNames: ['outcome'],
+    help: 'Requests from Django to run a transactional email, by outcome and route: `single` counts a request, `batch` counts each recipient of a batch. Every outcome except `queued` and `replayed` means no email was queued for it; `deadline_running` may still go out.',
+    labelNames: ['outcome', 'route'],
 })
 
 export const TRANSACTIONAL_EMAIL_STAGES = [
@@ -316,17 +318,21 @@ export type TransactionalEmailStage = (typeof TRANSACTIONAL_EMAIL_STAGES)[number
 
 export const transactionalEmailStageDurationMs = new Histogram({
     name: 'cdp_transactional_email_stage_duration_ms',
-    help: 'Milliseconds one transactional email request spends in each stage: auth (the JWT), validate (the body), load (the team and the workflow), build (the run and its idempotency fingerprint), idempotency (every Idempotency-Key call to Valkey), checks (suspension, pause, suppression, quota and MX), attachments (verifying the files and estimating the message, only for a send with files), queue_insert (the email queue insert), intake_produce (the produce to the intake topic and the wait for its ack, in intake async mode), metrics_flush (the hand-off of the result and status rows to the Kafka producer, without the wait for the broker), and total. A request records only the stages it reached, so a refusal shows in the stage that refused it.',
-    labelNames: ['stage'],
+    help: 'Milliseconds one transactional email request, or one recipient of a batch (route `batch`), spends in each stage: auth (the JWT), validate (the body), load (the team and the workflow), build (the run and its idempotency fingerprint), idempotency (every Idempotency-Key call to Valkey), checks (suspension, pause, suppression, quota and MX), attachments (verifying the files and estimating the message, only for a send with files), queue_insert (the email queue insert), intake_produce (the produce to the intake topic and the wait for its ack, in intake async mode), metrics_flush (the hand-off of the result and status rows to the Kafka producer, without the wait for the broker), and total. A request records only the stages it reached, so a refusal shows in the stage that refused it.',
+    labelNames: ['stage', 'route'],
     buckets: [1, 2.5, 5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000],
 })
 
 // The stages of a request run back to back, so starting a stage ends the one before it. finish() records each stage
 // once, with its summed time, so a stage entered twice (idempotency) still counts as one observation per request.
+export type TransactionalEmailRoute = 'single' | 'batch'
+
 export class TransactionalEmailStageTimer {
     private readonly startedAt = performance.now()
     private current: { stage: TransactionalEmailStage; startedAt: number } | null = null
     private readonly durations = new Map<TransactionalEmailStage, number>()
+
+    constructor(private readonly route: TransactionalEmailRoute = 'single') {}
 
     start(stage: TransactionalEmailStage): void {
         const now = performance.now()
@@ -338,9 +344,9 @@ export class TransactionalEmailStageTimer {
         const now = performance.now()
         this.endCurrent(now)
         for (const [stage, durationMs] of this.durations) {
-            transactionalEmailStageDurationMs.labels({ stage }).observe(durationMs)
+            transactionalEmailStageDurationMs.labels({ stage, route: this.route }).observe(durationMs)
         }
-        transactionalEmailStageDurationMs.labels({ stage: 'total' }).observe(now - this.startedAt)
+        transactionalEmailStageDurationMs.labels({ stage: 'total', route: this.route }).observe(now - this.startedAt)
     }
 
     private endCurrent(now: number): void {

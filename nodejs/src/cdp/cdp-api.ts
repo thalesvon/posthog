@@ -21,6 +21,7 @@ import {
     HealthCheckResultOk,
     PluginServerService,
     PluginsServerConfig,
+    Team,
 } from '../types'
 import { getAsyncFunctionHandler, getRegisteredAsyncFunctionNames } from './async-function-registry'
 import './async-functions'
@@ -79,6 +80,24 @@ import {
     transactionalEmailRequestsTotal,
 } from './services/hogflows/transactional-email'
 import {
+    BATCH_FAN_OUT,
+    BATCH_RESPONSE_DEADLINE_MS,
+    BatchCapacity,
+    BatchRecipient,
+    BatchSlot,
+    BatchSlotRequestSchema,
+    CODE_SEND_BATCH_TOKEN_CLAIMS,
+    CodeSendBatchRequestSchema,
+    SlotReply,
+    TEMPLATE_BATCH_TOKEN_CLAIMS,
+    TemplateBatchRequestSchema,
+    TransactionalEmailBatchRequest,
+    runBatchSlots,
+    slotRequestOf,
+    transactionalEmailBatchDurationMs,
+    transactionalEmailBatchRequestsTotal,
+} from './services/hogflows/transactional-email-batch'
+import {
     ScheduledTransactionalSends,
     TransactionalSendResult,
     TransactionalSends,
@@ -129,6 +148,7 @@ import {
     CyclotronPerson,
     HogFunctionInvocationGlobals,
     HogFunctionType,
+    IntegrationType,
     MinimalLogEntry,
 } from './types'
 import {
@@ -312,6 +332,54 @@ const TRANSACTIONAL_SEND_REFUSAL_STATUS: Record<TransactionalSendRefusal, number
     ...SANDBOX_CODE_SEND_REFUSAL_STATUS,
 }
 
+// The answer a single send gives for this result, which a batch gives per recipient.
+const sendReplyOf = (result: TransactionalSendResult): SlotReply => {
+    if ('invocationId' in result) {
+        return {
+            outcome: result.outcome,
+            status: 202,
+            body: {
+                status: result.scheduledAt ? 'scheduled' : 'queued',
+                invocation_id: result.invocationId,
+                scheduled_at: result.scheduledAt,
+                replayed: result.outcome === 'replayed',
+                ...result.replyFields,
+                ...(result.senderKind ? { sender_kind: result.senderKind } : {}),
+            },
+        }
+    }
+    if ('refused' in result) {
+        return { outcome: result.refused.body.error, status: result.refused.status, body: result.refused.body }
+    }
+    return {
+        outcome: result.outcome,
+        status: TRANSACTIONAL_SEND_REFUSAL_STATUS[result.outcome],
+        body: { error: result.outcome, ...(result.outcome === 'invalid_scheduled_at' && { reason: 'too_far' }) },
+    }
+}
+
+// Signup accepts some addresses this check refuses, and no retry can fix an address.
+const invalidSendReplyOf = (error: z.ZodError, context: Record<string, unknown>): SlotReply => {
+    const issues = error.issues
+    if (issues.every(isRecipientFormatIssue)) {
+        return { outcome: 'recipient_unreachable', status: 422, body: { error: 'recipient_unreachable' } }
+    }
+    // Paths and codes only: the values include the recipient's address.
+    logger.warn('⚠️', 'Transactional email request failed validation', {
+        ...context,
+        issues: issues.map((issue) => ({ path: issue.path.join('.'), code: issue.code })),
+    })
+    return { outcome: 'invalid_request', status: 400, body: { error: error.message } }
+}
+
+type BatchAdmission = { release: () => void; deadline: AbortSignal; arrivedAt: number }
+
+type BatchLookups = {
+    team: Promise<Team | null>
+    hogFlow: Promise<HogFlow | null>
+    sender: Promise<IntegrationType | null>
+}
+
 const sendBodies = (invocation: CyclotronJobInvocationHogFlow): MessageBodies => {
     const sendFields = acceptedSendEmailFields(invocation.state.send)
     return {
@@ -362,6 +430,9 @@ export class CdpApi {
     private transactionalEmailJwt: ScopedServiceJwt
     private manageTransactionalEmailJwt: ScopedServiceJwt
     private transactionalEmailIdempotencyKeys: IdempotencyKeys
+    private transactionalEmailBatchCapacity: BatchCapacity
+    private transactionalEmailBatchDeadlineMs = BATCH_RESPONSE_DEADLINE_MS
+    private transactionalEmailBatchBody = express.json({ limit: '20mb' })
     private attachmentUploads: AttachmentUploads
     private emailSuppressionService: EmailSuppressionService
     private emailValidationService: EmailValidationService
@@ -481,6 +552,10 @@ export class CdpApi {
             'transactional-email',
             config.CDP_IDEMPOTENCY_VALKEY_ENABLED
         )
+        this.transactionalEmailBatchCapacity = new BatchCapacity(
+            config.CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_REQUESTS,
+            config.CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_SLOTS
+        )
         this.attachmentUploads = new AttachmentUploads(services.attachmentStore, deps.idempotencyValkey ?? null, {
             teams: config.CDP_EMAIL_ATTACHMENTS_TEAMS,
             maxBytesPerTeamDay: config.CDP_EMAIL_ATTACHMENTS_UPLOAD_MAX_BYTES_PER_TEAM_DAY,
@@ -590,6 +665,18 @@ export class CdpApi {
         router.post(
             '/api/projects/:team_id/hog_flows/:id/transactional_email/send',
             asyncHandler(this.postTransactionalEmail(AcceptedSendRequestSchema, CODE_SEND_TOKEN_CLAIMS))
+        )
+        router.post(
+            '/api/projects/:team_id/hog_flows/:id/transactional_email/batch',
+            this.admitTransactionalEmailBatch(TEMPLATE_BATCH_TOKEN_CLAIMS),
+            this.parseTransactionalEmailBatchBody,
+            asyncHandler(this.postTransactionalEmailBatch(TemplateBatchRequestSchema))
+        )
+        router.post(
+            '/api/projects/:team_id/hog_flows/:id/transactional_email/send/batch',
+            this.admitTransactionalEmailBatch(CODE_SEND_BATCH_TOKEN_CLAIMS),
+            this.parseTransactionalEmailBatchBody,
+            asyncHandler(this.postTransactionalEmailBatch(CodeSendBatchRequestSchema))
         )
         router.post(
             '/api/projects/:team_id/transactional_email/attachments/uploads',
@@ -1474,7 +1561,11 @@ export class CdpApi {
             const verificationDeadline = deadlineAfter(ATTACHMENT_VERIFICATION_DEADLINE_MS)
             const stages = new TransactionalEmailStageTimer()
             const reply = (outcome: TransactionalEmailOutcome, status: number, body: Record<string, unknown>) => {
-                transactionalEmailRequestsTotal.inc({ outcome })
+                transactionalEmailRequestsTotal.inc({ outcome, route: 'single' })
+                return res.status(status).json(body)
+            }
+            const replyWith = ({ outcome, status, body }: SlotReply) => {
+                transactionalEmailRequestsTotal.inc({ outcome, route: 'single' })
                 return res.status(status).json(body)
             }
             try {
@@ -1493,24 +1584,15 @@ export class CdpApi {
                         tokenClaims
                     )
                 ) {
-                    transactionalEmailRequestsTotal.inc({ outcome: 'unauthorized' })
+                    transactionalEmailRequestsTotal.inc({ outcome: 'unauthorized', route: 'single' })
                     return
                 }
                 stages.start('validate')
                 const parsed = schema.safeParse(req.body)
                 if (!parsed.success) {
-                    const issues = parsed.error.issues
-                    // Signup accepts some addresses this check refuses, and no retry can fix an address.
-                    if (issues.every(isRecipientFormatIssue)) {
-                        return reply('recipient_unreachable', 422, { error: 'recipient_unreachable' })
-                    }
-                    // Paths and codes only: the values include the recipient's address.
-                    logger.warn('⚠️', 'Transactional email request failed validation', {
-                        team_id: req.params.team_id,
-                        hog_flow_id: req.params.id,
-                        issues: issues.map((issue) => ({ path: issue.path.join('.'), code: issue.code })),
-                    })
-                    return reply('invalid_request', 400, { error: parsed.error.message })
+                    return replyWith(
+                        invalidSendReplyOf(parsed.error, { team_id: req.params.team_id, hog_flow_id: req.params.id })
+                    )
                 }
                 const { send } = parsed.data
                 const senderLookup = send?.from
@@ -1518,25 +1600,7 @@ export class CdpApi {
                     : Promise.resolve(null)
                 // Several answers return before the sender lookup is awaited, so its failure must not go unhandled.
                 senderLookup.catch(() => undefined)
-                const answer = (result: TransactionalSendResult) => {
-                    if ('invocationId' in result) {
-                        return reply(result.outcome, 202, {
-                            status: result.scheduledAt ? 'scheduled' : 'queued',
-                            invocation_id: result.invocationId,
-                            scheduled_at: result.scheduledAt,
-                            replayed: result.outcome === 'replayed',
-                            ...result.replyFields,
-                            ...(result.senderKind ? { sender_kind: result.senderKind } : {}),
-                        })
-                    }
-                    if ('refused' in result) {
-                        return reply(result.refused.body.error, result.refused.status, result.refused.body)
-                    }
-                    return reply(result.outcome, TRANSACTIONAL_SEND_REFUSAL_STATUS[result.outcome], {
-                        error: result.outcome,
-                        ...(result.outcome === 'invalid_scheduled_at' && { reason: 'too_far' }),
-                    })
-                }
+                const answer = (result: TransactionalSendResult) => replyWith(sendReplyOf(result))
                 const sends = this.transactionalSendsForRequest()
                 const recalled = await sends.recall(
                     parseInt(req.params.team_id),
@@ -1596,6 +1660,174 @@ export class CdpApi {
                 stages.finish()
             }
         }
+
+    // Admits a batch before its body is parsed, so a pod at its request cap refuses the request without buffering
+    // its parsed body. The response deadline counts from here.
+    private admitTransactionalEmailBatch =
+        (tokenClaims: Record<string, string>) =>
+        (req: ModifiedRequest, res: express.Response, next: express.NextFunction): void => {
+            const arrivedAt = performance.now()
+            const refuse = (outcome: string, status: number, body: Record<string, unknown>): void => {
+                transactionalEmailBatchRequestsTotal.inc({ outcome })
+                res.status(status).json(body)
+            }
+            if (!this.transactionalEmailJwt.enabled) {
+                return refuse('not_configured', 503, {
+                    error: 'Transactional email auth not configured (WORKFLOWS_TRANSACTIONAL_EMAIL_JWT_SECRET unset)',
+                })
+            }
+            if (
+                !this.verifyScopedWorkflowJwt(
+                    this.transactionalEmailJwt,
+                    req,
+                    res,
+                    'transactional email batch',
+                    tokenClaims
+                )
+            ) {
+                transactionalEmailBatchRequestsTotal.inc({ outcome: 'unauthorized' })
+                return
+            }
+            const release = this.transactionalEmailBatchCapacity.admit()
+            if (!release) {
+                return refuse('over_capacity', 503, { error: 'over_capacity' })
+            }
+            res.locals.transactionalEmailBatch = {
+                release,
+                deadline: deadlineAfter(this.transactionalEmailBatchDeadlineMs),
+                arrivedAt,
+            } satisfies BatchAdmission
+            next()
+        }
+
+    private parseTransactionalEmailBatchBody = (
+        req: ModifiedRequest,
+        res: express.Response,
+        next: express.NextFunction
+    ): void => {
+        this.transactionalEmailBatchBody(req, res, (error?: unknown) => {
+            if (!error) {
+                return next()
+            }
+            ;(res.locals.transactionalEmailBatch as BatchAdmission).release()
+            const tooLarge = error instanceof Error && error.message === 'Request entity too large'
+            transactionalEmailBatchRequestsTotal.inc({ outcome: tooLarge ? 'too_large' : 'invalid_request' })
+            res.status(tooLarge ? 413 : 400).json({ error: tooLarge ? 'Request entity too large' : 'invalid_request' })
+        })
+    }
+
+    // One email to many recipients. Each recipient runs as its own single send, with its own claim and answer, so a
+    // retry of a partly accepted batch replays the recipients that were accepted.
+    private postTransactionalEmailBatch =
+        (schema: z.ZodType<TransactionalEmailBatchRequest, unknown>) =>
+        async (req: ModifiedRequest, res: express.Response): Promise<any> => {
+            const { release, deadline, arrivedAt } = res.locals.transactionalEmailBatch as BatchAdmission
+            let settled: Promise<void> = Promise.resolve()
+            try {
+                const parsed = schema.safeParse(req.body)
+                if (!parsed.success) {
+                    logger.warn('⚠️', 'Transactional email batch failed validation', {
+                        team_id: req.params.team_id,
+                        hog_flow_id: req.params.id,
+                        issues: parsed.error.issues.map((issue) => ({ path: issue.path.join('.'), code: issue.code })),
+                    })
+                    transactionalEmailBatchRequestsTotal.inc({ outcome: 'invalid_request' })
+                    return res.status(400).json({ error: parsed.error.message })
+                }
+                const batch = parsed.data
+                const teamId = parseInt(req.params.team_id)
+                // Started once for every recipient, and awaited only by a recipient whose key recalls nothing, so a
+                // retry of an accepted recipient replays even after its workflow changed.
+                const lookups: BatchLookups = {
+                    team: this.deps.teamManager.getTeam(teamId).catch(() => null),
+                    hogFlow: this.hogFlowManager.getHogFlowCheckingPrimaryOnMiss(req.params.id),
+                    sender: batch.send?.from
+                        ? this.deps.integrationManager.getCheckingPrimaryOnMiss(batch.send.from.integrationId)
+                        : Promise.resolve(null),
+                }
+                lookups.hogFlow.catch(() => undefined)
+                lookups.sender.catch(() => undefined)
+                const sends = this.transactionalSendsForRequest()
+                const run = await runBatchSlots(
+                    batch.recipients,
+                    (recipient, slot) =>
+                        this.sendBatchRecipient(sends, teamId, req.params.id, batch, recipient, lookups, slot),
+                    { slots: this.transactionalEmailBatchCapacity.slots, fanOut: BATCH_FAN_OUT, deadline }
+                )
+                settled = run.settled
+                for (const { outcome } of run.replies) {
+                    transactionalEmailRequestsTotal.inc({ outcome, route: 'batch' })
+                }
+                transactionalEmailBatchRequestsTotal.inc({ outcome: 'answered' })
+                return res.status(200).json({ results: run.replies.map(({ status, body }) => ({ status, body })) })
+            } catch (e) {
+                logger.error('Error running a transactional email batch', {
+                    error: e instanceof Error ? e.message : String(e),
+                })
+                transactionalEmailBatchRequestsTotal.inc({ outcome: 'error' })
+                return res.status(500).json({ error: e instanceof Error ? e.message : String(e) })
+            } finally {
+                transactionalEmailBatchDurationMs.observe(performance.now() - arrivedAt)
+                void settled.finally(release)
+            }
+        }
+
+    // A single send's sequence: recall first, then the workflow checks and `accept` for a recipient that recalled
+    // nothing.
+    private async sendBatchRecipient(
+        sends: TransactionalSends,
+        teamId: number,
+        hogFlowId: string,
+        batch: TransactionalEmailBatchRequest,
+        recipient: BatchRecipient,
+        lookups: BatchLookups,
+        slot: BatchSlot
+    ): Promise<SlotReply> {
+        const stages = new TransactionalEmailStageTimer('batch')
+        try {
+            stages.start('validate')
+            const parsed = BatchSlotRequestSchema.safeParse(slotRequestOf(batch, recipient))
+            if (!parsed.success) {
+                return invalidSendReplyOf(parsed.error, { team_id: teamId, hog_flow_id: hogFlowId })
+            }
+            const request = parsed.data
+            const recalled = await sends.recall(teamId, hogFlowId, request, stages, lookups.sender)
+            if (recalled) {
+                return sendReplyOf(recalled)
+            }
+            stages.start('load')
+            const team = await lookups.team
+            if (!team) {
+                return { outcome: 'not_found', status: 404, body: { error: 'Team not found' } }
+            }
+            const hogFlow = await lookups.hogFlow
+            // A single send answers 404 here, which Django retries. A batch answers each recipient for good: the
+            // workflow is gone for every one of them.
+            if (!hogFlow || hogFlow.team_id !== team.id || hogFlow.trigger?.type !== 'api') {
+                return { outcome: 'not_sendable', status: 400, body: { error: 'not_sendable' } }
+            }
+            const sender = request.send ? senderOfCodeSend(team.id, request.send, await lookups.sender) : undefined
+            slot.mayCommit()
+            return sendReplyOf(
+                await sends.accept(
+                    team,
+                    hogFlow,
+                    request,
+                    stages,
+                    {
+                        shape: null,
+                        sizeMessageBodies: (invocation, emailStep, deadline) =>
+                            this.messageBodyBytes(hogFlow, invocation, emailStep, deadline),
+                        deadline: deadlineAfter(ATTACHMENT_VERIFICATION_DEADLINE_MS),
+                    },
+                    sender,
+                    slot.settlement
+                )
+            )
+        } finally {
+            stages.finish()
+        }
+    }
 
     private async messageBodyBytes(
         hogFlow: HogFlow,

@@ -79,6 +79,7 @@ import {
     transactionalEmailRequestsTotal,
     transactionalEmailStageDurationMs,
 } from './services/hogflows/transactional-email'
+import { BatchCapacity } from './services/hogflows/transactional-email-batch'
 import { FINGERPRINT_PURPOSE } from './services/hogflows/transactional-sends'
 import { CyclotronJobQueuePostgresV2 } from './services/job-queue/job-queue-postgres-v2'
 import { SEND_NEEDS_FILES_FOR_MS } from './services/messaging/attachment-horizon'
@@ -101,7 +102,7 @@ import {
 import { BASE_REDIS_KEY, HogWatcherState } from './services/monitoring/hog-watcher.service'
 import { template as emailTemplate } from './templates/_destinations/email/email.template'
 import { compileHog } from './templates/compiler'
-import { HogFunctionInvocationGlobals, HogFunctionType } from './types'
+import { CyclotronJobInvocationHogFlow, HogFunctionInvocationGlobals, HogFunctionType } from './types'
 import { EMAIL_BODY_TAG_LIMIT, LIQUID_RENDER_LIMIT_MS } from './utils/liquid'
 
 // Email MX validation runs on every email send, so without a mock the test-panel
@@ -2751,7 +2752,9 @@ describe('CDP API', () => {
 
         // The alerts on this endpoint key on these outcome labels.
         const outcomeCount = async (outcome: string): Promise<number> =>
-            (await transactionalEmailRequestsTotal.get()).values.find((v) => v.labels.outcome === outcome)?.value ?? 0
+            (await transactionalEmailRequestsTotal.get()).values
+                .filter((v) => v.labels.outcome === outcome && v.labels.route === 'single')
+                .reduce((total, v) => total + v.value, 0)
         const stageCounts = async (): Promise<Record<string, number>> =>
             Object.fromEntries(
                 (await transactionalEmailStageDurationMs.get()).values
@@ -5407,6 +5410,222 @@ describe('CDP API', () => {
 
             expect(res.status).toEqual(401)
             expect(mockQueueInvocations).not.toHaveBeenCalled()
+        })
+
+        describe('to many recipients in one batch', () => {
+            type BatchRoute = 'transactional_email/batch' | 'transactional_email/send/batch'
+            const TEMPLATE: BatchRoute = 'transactional_email/batch'
+            const CODE: BatchRoute = 'transactional_email/send/batch'
+            const kindOf = (route: BatchRoute) => (route === CODE ? 'code_send_batch' : 'template_batch')
+            // A null kind mints the single template send's token, which carries no kind.
+            const sendBatch = (route: BatchRoute, payload: unknown, kind: string | null = kindOf(route)) =>
+                supertest(app)
+                    .post(`/api/projects/${team.id}/hog_flows/${hogFlow.id}/${route}`)
+                    .set({
+                        Authorization: `Bearer ${mintToken(team.id, hogFlow.id, { claims: kind ? { kind } : {} })}`,
+                    })
+                    .send(payload as object)
+            const recipient = (to: string, extra: Record<string, unknown> = {}) => ({
+                to,
+                distinct_id: `person-${to}`,
+                idempotency_key: `key-${new UUIDT().toString()}`,
+                ...extra,
+            })
+            const queuedRuns = (): CyclotronJobInvocationHogFlow[] =>
+                mockQueueInvocations.mock.calls.flatMap(([invocations]) => invocations)
+            const queued = expect.objectContaining({
+                status: 'queued',
+                invocation_id: expect.any(String),
+                replayed: false,
+            })
+            const stillRunning = { status: 503, body: { error: 'delivery_unavailable', may_still_go_out: true } }
+
+            it('queues one run per recipient with its own data, and answers each recipient in request order', async () => {
+                const res = await sendBatch(TEMPLATE, {
+                    variables: { reset_link: 'https://example.com/reset', name: 'there' },
+                    recipients: [
+                        recipient('ada@example.com', { variables: { name: 'Ada' } }),
+                        recipient('not-an-address'),
+                        recipient('bo@example.com'),
+                    ],
+                })
+
+                expect(res.status).toEqual(200)
+                expect(res.body.results).toEqual([
+                    { status: 202, body: queued },
+                    { status: 422, body: { error: 'recipient_unreachable' } },
+                    { status: 202, body: queued },
+                ])
+                expect(queuedRuns().map((run) => [run.id, run.state.event.properties.to, run.state.variables])).toEqual(
+                    expect.arrayContaining([
+                        [
+                            res.body.results[0].body.invocation_id,
+                            'ada@example.com',
+                            { reset_link: 'https://example.com/reset', name: 'Ada' },
+                        ],
+                        [
+                            res.body.results[2].body.invocation_id,
+                            'bo@example.com',
+                            { reset_link: 'https://example.com/reset', name: 'there' },
+                        ],
+                    ])
+                )
+                expect(queuedRuns()).toHaveLength(2)
+            })
+
+            it.each([
+                ['disabled', (flow: HogFlow) => ({ ...flow, status: 'draft' as const })],
+                ['gone', () => null],
+            ])(
+                'replays the accepted recipients of a retry after the workflow is %s, and refuses each new one',
+                async (_case, changed) => {
+                    const accepted = [recipient('ada@example.com'), recipient('bo@example.com')]
+                    const first = await sendBatch(TEMPLATE, { variables: body.variables, recipients: accepted })
+                    jest.spyOn(api['hogFlowManager'], 'getHogFlowCheckingPrimaryOnMiss').mockResolvedValue(
+                        changed(hogFlow)
+                    )
+
+                    const retry = await sendBatch(TEMPLATE, {
+                        variables: body.variables,
+                        recipients: [...accepted, recipient('cy@example.com')],
+                    })
+                    const single = await send(
+                        hogFlow.id,
+                        { Authorization: `Bearer ${mintToken(team.id, hogFlow.id)}` },
+                        {
+                            ...body,
+                            to: accepted[0].to,
+                            distinct_id: accepted[0].distinct_id,
+                            idempotency_key: accepted[0].idempotency_key,
+                        }
+                    )
+
+                    expect(retry.body.results).toEqual([
+                        { status: 202, body: { ...first.body.results[0].body, replayed: true } },
+                        { status: 202, body: { ...first.body.results[1].body, replayed: true } },
+                        { status: 400, body: { error: 'not_sendable' } },
+                    ])
+                    expect(single.body).toMatchObject({
+                        invocation_id: first.body.results[0].body.invocation_id,
+                        replayed: true,
+                    })
+                    expect(queuedRuns()).toHaveLength(2)
+                }
+            )
+
+            it.each([
+                ['a single template token', TEMPLATE, null],
+                ['a single code token', CODE, 'code_send'],
+                ['the other batch form', TEMPLATE, 'code_send_batch'],
+            ])('refuses a batch carrying %s', async (_case, route, kind) => {
+                const res = await sendBatch(route, { recipients: [recipient('ada@example.com')] }, kind)
+
+                expect(res.status).toEqual(401)
+                expect(queuedRuns()).toEqual([])
+            })
+
+            it.each([
+                ['transactional_email', 'template_batch'],
+                ['transactional_email/send', 'code_send_batch'],
+            ])('refuses a batch token on the single route %s', async (route, kind) => {
+                const res = await sendOn(
+                    route,
+                    hogFlow.id,
+                    { Authorization: `Bearer ${mintToken(team.id, hogFlow.id, { claims: { kind } })}` },
+                    route.endsWith('/send') ? { ...body, send: codeSend } : body
+                )
+
+                expect(res.status).toEqual(401)
+                expect(queuedRuns()).toEqual([])
+            })
+
+            it.each([
+                ['off', '', '', TEMPLATE, 2, 0],
+                ['shadow', 'shadow', '', CODE, 2, 2],
+                ['async', '', 'async', CODE, 0, 2],
+            ])(
+                'sends each recipient as its own run with its team in intake mode %s',
+                async (_mode, shadow, async, route, inserted, produced) => {
+                    api['config'].CDP_INTAKE_KAFKA_SHADOW_TEAMS = shadow ? String(team.id) : ''
+                    api['config'].CDP_INTAKE_KAFKA_ASYNC_TEAMS = async ? String(team.id) : ''
+                    try {
+                        const res = await sendBatch(route, {
+                            ...(route === CODE ? { send: codeSend } : { variables: body.variables }),
+                            recipients: [recipient('ada@example.com'), recipient('bo@example.com')],
+                        })
+
+                        expect(res.body.results).toEqual([
+                            { status: 202, body: queued },
+                            { status: 202, body: queued },
+                        ])
+                        expect(queuedRuns()).toHaveLength(inserted)
+                        expect(
+                            produceOutput.mock.calls.filter(([output]) => output === 'cdp_intake_transactional_email')
+                        ).toHaveLength(produced)
+                    } finally {
+                        api['config'].CDP_INTAKE_KAFKA_SHADOW_TEAMS = ''
+                        api['config'].CDP_INTAKE_KAFKA_ASYNC_TEAMS = ''
+                    }
+                }
+            )
+
+            describe('at the limits of the pod', () => {
+                let capacity: BatchCapacity
+                beforeEach(() => {
+                    capacity = api['transactionalEmailBatchCapacity']
+                })
+                afterEach(() => {
+                    api['transactionalEmailBatchCapacity'] = capacity
+                    api['transactionalEmailBatchDeadlineMs'] = 20_000
+                })
+
+                it('refuses a request over the request cap before it parses the body', async () => {
+                    api['transactionalEmailBatchCapacity'] = new BatchCapacity(0, 100)
+                    // An app-wide parser answers a body over its limit before any route runs, so only a request
+                    // admitted ahead of that parser reaches the capacity check.
+                    const served = setupExpressApp({ jsonBodyLimit: '1kb' })
+                    served.use('/', api.router())
+                    const server = served.listen(0, () => {})
+
+                    try {
+                        const res = await supertest(served)
+                            .post(`/api/projects/${team.id}/hog_flows/${hogFlow.id}/${TEMPLATE}`)
+                            .set({
+                                Authorization: `Bearer ${mintToken(team.id, hogFlow.id, { claims: { kind: 'template_batch' } })}`,
+                                'Content-Type': 'application/json',
+                            })
+                            .send({ variables: { body: 'x'.repeat(2048) }, recipients: [] })
+
+                        expect(res.status).toEqual(503)
+                        expect(res.body).toEqual({ error: 'over_capacity' })
+                    } finally {
+                        server.close()
+                    }
+                })
+
+                it('answers by its deadline while a shared lookup stalls, and keeps its permit until its recipients settle', async () => {
+                    api['transactionalEmailBatchCapacity'] = new BatchCapacity(1, 100)
+                    api['transactionalEmailBatchDeadlineMs'] = 100
+                    let loaded: () => void = () => {}
+                    jest.spyOn(api['hogFlowManager'], 'getHogFlowCheckingPrimaryOnMiss').mockReturnValue(
+                        new Promise((resolve) => (loaded = () => resolve(hogFlow)))
+                    )
+                    const batch = () =>
+                        sendBatch(TEMPLATE, {
+                            variables: body.variables,
+                            recipients: [recipient('ada@example.com'), recipient('bo@example.com')],
+                        })
+
+                    const stalled = await batch()
+                    const whileStalled = await batch()
+                    loaded()
+
+                    expect(stalled.body.results).toEqual([stillRunning, stillRunning])
+                    expect(whileStalled.status).toEqual(503)
+                    await waitForExpect(() => expect(queuedRuns()).toHaveLength(2))
+                    await waitForExpect(async () => expect((await batch()).status).toEqual(200))
+                })
+            })
         })
 
         describe('cancel and reschedule of a scheduled send', () => {
