@@ -457,10 +457,11 @@ class TestTransactionalEmailBatch(APIBaseTest):
     def test_a_sandbox_batch_that_names_a_sender_answers_as_a_single_send_does(self, mock_post, _flag, _capture):
         Integration.objects.filter(id=self.sender.id).delete()
         TeamWorkflowsConfig.objects.filter(team_id=self.team.id).update(default_email_integration_id=None)
-        sender = {"from": "Example <hello@example.org>"}
+        sender = {"from": "Example <hello@example.org>", "reply_to": ["help@example.org"]}
         sandbox_send = {"invocation_id": "sandbox-1", "sender_kind": "email_sandbox"}
         mock_post.return_value = MagicMock(status_code=202, json=lambda: sandbox_send)
         single = self._single("code", **sender)
+        single_send = _forwarded(mock_post.call_args)["send"] if mock_post.called else None
         mock_post.return_value = _batch_answer(*[{"status": 202, "body": sandbox_send}] * 2)
 
         batch = self._batch("code", **sender)
@@ -468,6 +469,7 @@ class TestTransactionalEmailBatch(APIBaseTest):
         if single.status_code == status.HTTP_202_ACCEPTED:
             assert batch.status_code == status.HTTP_200_OK, batch.json()
             assert batch.json()["warnings"] == single.json()["warnings"]
+            assert _forwarded(mock_post.call_args)["send"] == single_send
         else:
             assert (batch.status_code, batch.json()) == (single.status_code, single.json())
 
