@@ -159,6 +159,19 @@ describe('batchDeadlineMs', () => {
 })
 
 describe('TemplateBatchRequestSchema', () => {
+    it.each([
+        [100, true],
+        [101, false],
+    ])('takes a list of %i recipients: %s', (count, accepted) => {
+        const recipients = Array.from({ length: count }, (_, i) => ({
+            to: `person-${i}@example.com`,
+            distinct_id: `person-${i}`,
+            idempotency_key: `key-${i}`,
+        }))
+
+        expect(TemplateBatchRequestSchema.safeParse({ recipients }).success).toBe(accepted)
+    })
+
     it('refuses a recipient list over the cap with one issue, without reading any recipient', () => {
         const recipients: unknown[] = Array.from({ length: 1000 }, () => ({}))
         let reads = 0
