@@ -24,7 +24,7 @@ const PARTITIONS: u32 = 8;
 const EPOCH: u64 = 3;
 
 /// A follower that follows nothing, so every partition is behind. No broker is dialed.
-fn follower_reads() -> FollowerReads {
+pub(super) fn follower_reads() -> FollowerReads {
     let kafka = KafkaConfig::init_from_hashmap(&HashMap::new()).expect("kafka config");
     let warming = WarmingConfig {
         kafka: kafka.clone(),
@@ -124,7 +124,7 @@ fn stamped<T>(message: T, headers: &[(&'static str, u64)]) -> Request<T> {
     request
 }
 
-fn own_partition() -> u64 {
+pub(super) fn own_partition() -> u64 {
     u64::from(personhog_common::partitioning::partition_for_person(
         1, 42, PARTITIONS,
     ))
