@@ -260,9 +260,6 @@ export function upstreamTurnRetryDelayMs(attempt: number): number {
 const PENDING_ARTIFACT_MAX_ATTEMPTS = 4;
 const PENDING_ARTIFACT_RETRY_DELAY_MS = 500;
 
-const POSTHOG_AI_ORIGIN_PRODUCT = "posthog_ai";
-const KNOWLEDGE_WRITER_ORIGIN_PRODUCT = "knowledge_writer";
-
 export function systemPromptAppendText(
   prompt: ClaudeCodeConfig["systemPrompt"],
 ): string {
@@ -563,7 +560,7 @@ export class AgentServer {
   private productSession: SessionBehavior = {};
   private productLaunch: ProductLaunchConfiguration;
   private taskRepositories: string[] = [];
-  private taskOriginProduct: string | null = null;
+  private branchPushOnly = false;
   // Reset per session. `evaluatedPrUrls` dedupes per URL; `prAttributionChain` serializes
   // attributions so the most recently created PR in a run wins.
   private readonly evaluatedPrUrls = new Set<string>();
@@ -2232,7 +2229,7 @@ export class AgentServer {
     };
     const launch = readRunLaunch(launchSources);
     this.taskRepositories = launch.repositories;
-    this.taskOriginProduct = launch.originProduct;
+    this.branchPushOnly = launch.policy.branchPushOnly;
 
     this.runUsage = new RunUsageAccumulator();
     this.runUsageRunId = payload.run_id;
@@ -2306,7 +2303,7 @@ export class AgentServer {
     );
 
     if (
-      launch.originProduct === POSTHOG_AI_ORIGIN_PRODUCT &&
+      launch.policy.expectsSystemPrompt &&
       !systemPromptAppendText(launch.systemPrompt)
     ) {
       this.logger.warn("posthog_ai_run_state_system_prompt_missing", {
@@ -2514,11 +2511,11 @@ export class AgentServer {
       ...(channelMode && { channelMode: true }),
       budgetSteer: { mode: this.budgetSteerMode() },
       posthogExecPermissionRegex: this.posthogExecPermissionRegexSource,
-      ...(launch.originProduct && {
-        taskOriginProduct: launch.originProduct,
+      ...(launch.policy.finishTool && { finishTool: true }),
+      ...(launch.policy.finishReportRequired && {
+        finishReportRequired: true,
       }),
-      ...(launch.endRunWhenDone && { endRunWhenDone: true }),
-      ...(launch.callerEndsRun && { callerEndsRun: true }),
+      ...(launch.policy.reportActivityTool && { reportActivityTool: true }),
       ...(launch.disableRepoHooks && { disableRepoHooks: true }),
       ...(this.config.baseBranch && { baseBranch: this.config.baseBranch }),
       ...(runtimeAdapter === "claude" &&
@@ -4851,8 +4848,7 @@ export class AgentServer {
     return new CloudTaskPrompt({
       apiUrl: this.config.apiUrl,
       baseBranch: this.config.baseBranch,
-      branchPushOnly:
-        this.taskOriginProduct === KNOWLEDGE_WRITER_ORIGIN_PRODUCT,
+      branchPushOnly: this.branchPushOnly,
       createPr: this.config.createPr,
       hasGithubToken: Boolean(resolveGithubToken()),
       identityInstructions: this.productSession.identityInstructions,
