@@ -5586,12 +5586,13 @@ describe('CDP API', () => {
                             String(body.invocation_id)
                         )
                         expect((await storedRuns()).map(({ id }) => id).sort()).toEqual(inserts ? runIds.sort() : [])
-                        expect(
-                            produced()
-                                .filter((message) => message.kind === 'transactional-email')
-                                .map((message) => message.job.id)
-                                .sort()
-                        ).toEqual(produces ? runIds.sort() : [])
+                        const intakeRecords = produced().filter((message) => message.kind === 'transactional-email')
+                        expect(intakeRecords.map((message) => message.job.id).sort()).toEqual(
+                            produces ? runIds.sort() : []
+                        )
+                        expect(intakeRecords.map((message) => message.teamId)).toEqual(
+                            produces ? [team.id, team.id] : []
+                        )
                     } finally {
                         api['config'].CDP_INTAKE_KAFKA_SHADOW_TEAMS = ''
                         api['config'].CDP_INTAKE_KAFKA_ASYNC_TEAMS = ''
@@ -5689,9 +5690,15 @@ describe('CDP API', () => {
                 it('answers by its deadline while a recipient waits on a held claim, and keeps its permit until it settles', async () => {
                     const { app: own } = await servedWith({
                         CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_REQUESTS: 1,
-                        CDP_TRANSACTIONAL_EMAIL_BATCH_DEADLINE_MS: 300,
+                        CDP_TRANSACTIONAL_EMAIL_BATCH_DEADLINE_MS: 600,
                     })
+                    // A first batch loads the workflow and the team, so the free recipient answers well inside the
+                    // deadline, which stays below the claim insert's lock timeout.
+                    expect((await sendBatchTo(own, TEMPLATE, batchOf(recipient('warm@example.com')))).status).toEqual(
+                        200
+                    )
                     const stuck = recipient('ada@example.com')
+                    const free = recipient('bo@example.com')
                     const holder = await cyclotron.connect()
                     let stalled!: supertest.Response
                     let whileStalled!: supertest.Response
@@ -5703,14 +5710,22 @@ describe('CDP API', () => {
                             [keyedRunId(team.id, 'transactional-email', stuck.idempotency_key), team.id]
                         )
 
-                        stalled = await sendBatchTo(own, TEMPLATE, batchOf(stuck))
-                        whileStalled = await sendBatchTo(own, TEMPLATE, batchOf(recipient('bo@example.com')))
+                        stalled = await sendBatchTo(own, TEMPLATE, batchOf(stuck, free))
+                        whileStalled = await sendBatchTo(own, TEMPLATE, batchOf(recipient('di@example.com')))
                     } finally {
                         await holder.query('ROLLBACK')
                         holder.release()
                     }
 
-                    expect(stalled.body.results).toEqual([stillRunning])
+                    expect(stalled.body.results).toEqual([stillRunning, { status: 202, body: queued }])
+                    expect(await storedRuns()).toEqual(
+                        expect.arrayContaining([
+                            expect.objectContaining({
+                                id: stalled.body.results[1].body.invocation_id,
+                                to: 'bo@example.com',
+                            }),
+                        ])
+                    )
                     expect(whileStalled.status).toEqual(503)
                     await waitForExpect(async () =>
                         expect((await sendBatchTo(own, TEMPLATE, batchOf(recipient('cy@example.com')))).status).toEqual(
@@ -5736,6 +5751,41 @@ describe('CDP API', () => {
                             200
                         )
                     )
+                })
+
+                it('answers a body still arriving at the deadline, and frees its admission', async () => {
+                    const { app: own, port } = await servedWith({
+                        CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_REQUESTS: 1,
+                        CDP_TRANSACTIONAL_EMAIL_BATCH_DEADLINE_MS: 300,
+                    })
+                    const slow = postRaw(port, { 'Content-Length': '100000' })
+                    const answered = new Promise<{ status: number; body: string }>((resolve) =>
+                        slow.on('response', (response) => {
+                            let body = ''
+                            response.on('data', (chunk) => (body += chunk))
+                            response.on('end', () => resolve({ status: response.statusCode ?? 0, body }))
+                        })
+                    )
+                    slow.write('{"recipients": [')
+
+                    const answer = await answered
+
+                    slow.destroy()
+                    expect(answer.status).toEqual(503)
+                    expect(parseJSON(answer.body)).toEqual({ error: 'deadline_exceeded' })
+                    expect((await sendBatchTo(own, TEMPLATE, batchOf(recipient('cy@example.com')))).status).toEqual(200)
+                })
+
+                it('takes no admission for a request whose deadline setting cannot build a deadline', async () => {
+                    const { app: own } = await servedWith({
+                        CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_REQUESTS: 1,
+                        CDP_TRANSACTIONAL_EMAIL_BATCH_DEADLINE_MS: -1,
+                    })
+
+                    const first = await sendBatchTo(own, TEMPLATE, batchOf(recipient('ada@example.com')))
+                    const second = await sendBatchTo(own, TEMPLATE, batchOf(recipient('bo@example.com')))
+
+                    expect([first.status, second.status]).toEqual([500, 500])
                 })
 
                 it('sends nothing from a body that grows past the size limit while it streams', async () => {

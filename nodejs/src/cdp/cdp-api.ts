@@ -1687,15 +1687,12 @@ export class CdpApi {
                 transactionalEmailBatchRequestsTotal.inc({ outcome: 'unauthorized' })
                 return
             }
+            const deadline = deadlineAfter(this.config.CDP_TRANSACTIONAL_EMAIL_BATCH_DEADLINE_MS)
             const release = this.transactionalEmailBatchCapacity.admit()
             if (!release) {
                 return refuse('over_capacity', 503, { error: 'over_capacity' })
             }
-            res.locals.transactionalEmailBatch = {
-                release,
-                deadline: deadlineAfter(this.config.CDP_TRANSACTIONAL_EMAIL_BATCH_DEADLINE_MS),
-                arrivedAt,
-            } satisfies BatchAdmission
+            res.locals.transactionalEmailBatch = { release, deadline, arrivedAt } satisfies BatchAdmission
             next()
         }
 
