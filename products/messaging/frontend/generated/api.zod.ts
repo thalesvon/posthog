@@ -597,6 +597,8 @@ export const messagingProviderImportsCreateBodyStepsItemMax = 64
 
 export const messagingProviderImportsCreateBodyApiKeyMax = 512
 
+export const messagingProviderImportsCreateBodySettingsMaxOne = 64
+
 export const MessagingProviderImportsCreateBody = /* @__PURE__ */ zod.object({
     provider: zod
         .enum(['customerio', 'resend', 'postmark'])
@@ -616,6 +618,12 @@ export const MessagingProviderImportsCreateBody = /* @__PURE__ */ zod.object({
         .optional()
         .describe(
             "The provider's API key. For Customer.io, an App API key: leave it out to reuse the stored key. For Resend, a full access key. For Postmark, a server token or the account token. PostHog deletes a Resend key or Postmark token when the run ends, so send it every time."
+        ),
+    settings: zod
+        .record(zod.string(), zod.string().max(messagingProviderImportsCreateBodySettingsMaxOne))
+        .optional()
+        .describe(
+            "Values for the provider's `settings`, by setting key, from the `providers` endpoint. A setting with a null `default` is required."
         ),
 })
 

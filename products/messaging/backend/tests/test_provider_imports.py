@@ -5,6 +5,7 @@ from posthog.test.base import BaseTest
 from unittest.mock import MagicMock, patch
 
 from django.db import IntegrityError
+from django.test import SimpleTestCase
 from django.utils import timezone
 
 from parameterized import parameterized
@@ -16,7 +17,12 @@ from products.messaging.backend.models.message_preferences import (
 from products.messaging.backend.models.message_suppression import MessageSuppression
 from products.messaging.backend.models.provider_import_run import ProviderImportRun
 from products.messaging.backend.provider_imports import runs
-from products.messaging.backend.provider_imports.base import ImportProviderUnavailable
+from products.messaging.backend.provider_imports.base import (
+    ImportProviderUnavailable,
+    ImportSettingChoice,
+    ImportSettingSpec,
+)
+from products.messaging.backend.provider_imports.resend import ResendImportProvider
 from products.messaging.backend.services.customerio_client import CustomerIOAPIError
 
 SERVICE = "products.messaging.backend.services.customerio_import_service"
@@ -314,3 +320,29 @@ class TestProviderImportRuns(BaseTest):
         assert expired is not None
         assert expired.status == "failed"
         assert expired.progress["suppressions"]["status"] == "failed"
+
+
+REGION = ImportSettingSpec(
+    key="region",
+    label="Region",
+    help="",
+    choices=(ImportSettingChoice(value="us", label="US"), ImportSettingChoice(value="eu", label="EU")),
+)
+
+
+class TestImportSettings(SimpleTestCase):
+    @parameterized.expand(
+        [
+            ("missing_without_default", {}, "Choose a value for Region"),
+            ("not_a_choice", {"region": "mars"}, "mars isn't a valid value for Region"),
+            ("unknown", {"region": "us", "color": "red"}, "no setting named color"),
+        ]
+    )
+    def test_settings_are_checked_before_the_key_goes_anywhere(self, _name: str, settings: dict, message: str) -> None:
+        with (
+            patch.object(ResendImportProvider, "settings", (REGION,)),
+            patch.object(ResendImportProvider, "check_credentials") as check_credentials,
+            self.assertRaisesRegex(runs.InvalidImportSettings, message),
+        ):
+            runs.start_run(1, "resend", ["suppressions"], "key", None, settings)
+        check_credentials.assert_not_called()
