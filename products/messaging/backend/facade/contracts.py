@@ -269,6 +269,25 @@ class QueuedEmail:
     attachment_bytes: int | None = None
 
 
+class SendNotAttempted(DeliveryUnavailable):
+    pass
+
+
+@frozen
+class BatchRecipient:
+    to: str
+    idempotency_key: str
+    distinct_id: str | None = None
+    message_data: dict[str, Any] = field(default_factory=dict)
+    refusal: InvalidRecipient | None = None
+
+
+@frozen
+class EmailBatchSent:
+    results: tuple[QueuedEmail | TransactionalEmailError | DeliveryUnavailable, ...]
+    warnings: tuple[SendWarning, ...] = ()
+
+
 class SupabaseEmailActionType(LabeledStrEnum):
     """The `email_action_type` values Supabase's Send Email Hook sends."""
 
