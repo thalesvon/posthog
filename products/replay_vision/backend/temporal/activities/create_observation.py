@@ -38,6 +38,7 @@ from products.replay_vision.backend.quota import (
     org_credit_cap_for,
     quota_state_for_cap,
 )
+from products.replay_vision.backend.scope.load import experiment_id_of
 from products.replay_vision.backend.temporal.constants import ADMISSION_BUDGET_TTL, CREATE_OBSERVATION_TIMEOUT
 from products.replay_vision.backend.temporal.decorators import track_activity
 from products.replay_vision.backend.temporal.errors import SCANNER_ADMISSION_BUSY_ERROR_TYPE
@@ -290,6 +291,7 @@ def _reclaim_own_pending_insert(inputs: CreateObservationInputs) -> CreateObserv
         observation_id=existing.id,
         was_created=True,
         scanner_type=existing_snapshot.scanner_type,
+        watches_experiment=experiment_id_of(existing_snapshot) is not None,
     )
 
 
@@ -309,6 +311,7 @@ def _retake_failed_row(inputs: CreateObservationInputs, row_fields: dict[str, An
         observation_id=existing.id,
         was_created=True,
         scanner_type=existing_snapshot.scanner_type,
+        watches_experiment=experiment_id_of(existing_snapshot) is not None,
     )
 
 
@@ -519,10 +522,12 @@ def _create_observation(inputs: CreateObservationInputs) -> CreateObservationOut
             observation_id=existing.id,
             was_created=reclaimed,
             scanner_type=existing_snapshot.scanner_type,
+            watches_experiment=experiment_id_of(existing_snapshot) is not None,
         )
 
     return CreateObservationOutput(
         observation_id=observation.id,
         was_created=True,
         scanner_type=scanner.scanner_type,
+        watches_experiment=experiment_id_of(scanner) is not None,
     )
