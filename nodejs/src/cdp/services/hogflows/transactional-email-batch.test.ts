@@ -149,12 +149,12 @@ describe('BatchCapacity', () => {
 })
 
 describe('batchDeadlineMs', () => {
-    it.each([-1, 0, 2.5, 30_000])('refuses a deadline of %s ms', (setting) => {
+    it.each([-1, 0, 2.5, 25_001, 29_999])('refuses a deadline of %s ms', (setting) => {
         expect(() => batchDeadlineMs(setting)).toThrow('CDP_TRANSACTIONAL_EMAIL_BATCH_DEADLINE_MS')
     })
 
-    it('keeps a deadline that answers before Django gives up', () => {
-        expect(batchDeadlineMs(29_999)).toBe(29_999)
+    it('keeps a deadline that leaves Django time to read the answer', () => {
+        expect(batchDeadlineMs(25_000)).toBe(25_000)
     })
 })
 

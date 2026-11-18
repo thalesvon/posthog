@@ -4,7 +4,7 @@ import { z } from 'zod'
 
 import { logger } from '~/common/utils/logger'
 
-import { Settlement } from '../../intake/intake-producer'
+import { PublishSettlement } from '../../intake/intake-producer'
 import { Semaphore } from '../../utils/sempahore'
 import { BatchSendSchema, TransactionalEmailOutcome, TransactionalEmailRequestSchema } from './transactional-email'
 
@@ -14,13 +14,14 @@ export const CODE_SEND_BATCH_TOKEN_CLAIMS = { kind: 'code_send_batch' }
 export const BATCH_MAX_RECIPIENTS = 100
 export const BATCH_FAN_OUT = 25
 
-// Django drops a forwarded call after 30 s, so a batch that answers later returns none of its results.
-const DJANGO_FORWARD_TIMEOUT_MS = 30_000
+// Django drops a forwarded call after 30 s, so a batch that answers later returns none of its results. The cap leaves
+// 5 s for the answer to travel back and for Django to read it.
+const BATCH_DEADLINE_MAX_MS = 25_000
 
 export const batchDeadlineMs = (setting: number): number => {
-    if (!Number.isInteger(setting) || setting <= 0 || setting >= DJANGO_FORWARD_TIMEOUT_MS) {
+    if (!Number.isInteger(setting) || setting <= 0 || setting > BATCH_DEADLINE_MAX_MS) {
         throw new Error(
-            `CDP_TRANSACTIONAL_EMAIL_BATCH_DEADLINE_MS must be a whole number of milliseconds from 1 to ${DJANGO_FORWARD_TIMEOUT_MS - 1}, got ${setting}`
+            `CDP_TRANSACTIONAL_EMAIL_BATCH_DEADLINE_MS must be a whole number of milliseconds from 1 to ${BATCH_DEADLINE_MAX_MS}, got ${setting}`
         )
     }
     return setting
@@ -100,7 +101,7 @@ export type SlotOutcome = TransactionalEmailOutcome | 'not_sendable' | 'deadline
 export type SlotReply = { outcome: SlotOutcome; status: number; body: Record<string, unknown> }
 
 export type BatchSlot = {
-    settlement: Settlement
+    settlement: PublishSettlement
     // Called before the step that can queue the email, so a later failure answers "may still go out".
     mayCommit: () => void
 }
@@ -208,11 +209,11 @@ export const runBatchSlots = async <T>(
 
     const runOne = async (i: number): Promise<void> => {
         started[i] = true
-        const publishes: Promise<unknown>[] = []
+        const settlement = new PublishSettlement()
         let mayHaveCommitted = false
         try {
             replies[i] = await runSlot(items[i], {
-                settlement: { track: (publish) => publishes.push(publish) },
+                settlement,
                 mayCommit: () => (mayHaveCommitted = true),
             })
         } catch (error) {
@@ -224,7 +225,7 @@ export const runBatchSlots = async <T>(
         if (++answered === items.length) {
             allAnswered()
         }
-        await Promise.allSettled(publishes)
+        await settlement.settled()
     }
     const worker = async (): Promise<void> => {
         while (next < items.length && !deadline.aborted) {

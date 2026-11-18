@@ -44,8 +44,9 @@ const READ_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
 // Routes that parse their own body after admission. Anchored to exactly one route each, like the scoped-auth patterns.
 const ROUTE_PARSED_BODY_PATTERNS = [
     // CdpApi.postTransactionalEmailBatch
-    /^\/api\/projects\/[^/]+\/hog_flows\/[^/]+\/transactional_email\/batch$/,
-    /^\/api\/projects\/[^/]+\/hog_flows\/[^/]+\/transactional_email\/send\/batch$/,
+    // Express routing is not strict, so the route also takes the path with a trailing slash. These match it too.
+    /^\/api\/projects\/[^/]+\/hog_flows\/[^/]+\/transactional_email\/batch\/?$/,
+    /^\/api\/projects\/[^/]+\/hog_flows\/[^/]+\/transactional_email\/send\/batch\/?$/,
 ]
 
 export function setupCommonRoutes(

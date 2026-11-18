@@ -434,8 +434,8 @@ export class CdpApi {
     private transactionalEmailIdempotencyKeys: IdempotencyKeys
     private transactionalEmailBatchCapacity: BatchCapacity
     private transactionalEmailBatchDeadlineMs: number
-    // Django sends a batch uncompressed. ultimate-express inflates a compressed body in a socket callback that nothing
-    // catches, so a malformed compressed body would crash the pod.
+    // ultimate-express inflates a compressed body in a socket callback that nothing catches, so a malformed compressed
+    // body would crash the pod. The route refuses an encoded body before this parser reads it.
     private transactionalEmailBatchBody = express.json({ limit: '20mb', inflate: false })
     private attachmentUploads: AttachmentUploads
     private emailSuppressionService: EmailSuppressionService
@@ -1707,6 +1707,14 @@ export class CdpApi {
         next: express.NextFunction
     ): void => {
         const { release, deadline } = res.locals.transactionalEmailBatch as BatchAdmission
+        // Django sends a batch uncompressed. With inflate off, a body that only claims an encoding would still parse.
+        const encoding = req.headers['content-encoding']
+        if (encoding !== undefined && encoding.trim().toLowerCase() !== 'identity') {
+            release()
+            transactionalEmailBatchRequestsTotal.inc({ outcome: 'invalid_request' })
+            res.status(BODY_READ_REFUSAL_STATUS.invalid_request).json({ error: 'invalid_request' })
+            return
+        }
         void readBatchBody((done) => this.transactionalEmailBatchBody(req, res, done), {
             connection: res.socket,
             deadline,

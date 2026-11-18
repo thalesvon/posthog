@@ -9,6 +9,7 @@ import http, { Server } from 'http'
 import jwt from 'jsonwebtoken'
 import { DateTime } from 'luxon'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
+import { gzipSync } from 'node:zlib'
 import { Pool } from 'pg'
 import pino from 'pino'
 import { Counter, register } from 'prom-client'
@@ -5670,22 +5671,25 @@ describe('CDP API', () => {
                     )
                 })
 
-                it('refuses a request over the request cap before it parses the body', async () => {
-                    // An app-wide parser answers a body over its limit before any route runs, so only a request
-                    // admitted ahead of that parser reaches the capacity check.
-                    const { app: full } = await servedWith(
-                        { CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_REQUESTS: 0 },
-                        { jsonBodyLimit: '1kb' }
-                    )
+                it.each(['', '/'])(
+                    'refuses a request over the request cap before it parses the body, with path suffix %j',
+                    async (suffix) => {
+                        // An app-wide parser answers a body over its limit before any route runs, so only a request
+                        // admitted ahead of that parser reaches the capacity check.
+                        const { app: full } = await servedWith(
+                            { CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_REQUESTS: 0 },
+                            { jsonBodyLimit: '1kb' }
+                        )
 
-                    const res = await sendBatchTo(full, TEMPLATE, {
-                        variables: { body: 'x'.repeat(2048) },
-                        recipients: [],
-                    })
+                        const res = await supertest(full)
+                            .post(pathOf(TEMPLATE) + suffix)
+                            .set({ Authorization: authorizationFor('template_batch') })
+                            .send({ variables: { body: 'x'.repeat(2048) }, recipients: [] })
 
-                    expect(res.status).toEqual(503)
-                    expect(res.body).toEqual({ error: 'over_capacity' })
-                })
+                        expect(res.status).toEqual(503)
+                        expect(res.body).toEqual({ error: 'over_capacity' })
+                    }
+                )
 
                 it('answers by its deadline while a recipient waits on a held claim, and keeps its permit until it settles', async () => {
                     const { app: own } = await servedWith({
@@ -5786,21 +5790,30 @@ describe('CDP API', () => {
                     ).toThrow('CDP_TRANSACTIONAL_EMAIL_BATCH_DEADLINE_MS')
                 })
 
-                it('answers a malformed compressed body with 400 and keeps serving', async () => {
-                    const { app: own, port } = await servedWith({})
-                    const compressed = postRaw(port, { 'Content-Encoding': 'gzip' })
-                    const answered = new Promise<number>((resolve) =>
-                        compressed.on('response', (response) => {
-                            response.resume()
-                            resolve(response.statusCode ?? 0)
-                        })
-                    )
-                    compressed.end('not a gzip stream')
+                // Django sends a batch uncompressed, so any encoded body is refused, whether it inflates or not.
+                it.each([
+                    ['a malformed', () => Buffer.from('not a gzip stream')],
+                    ['a valid', () => gzipSync(JSON.stringify(batchOf(recipient('gz@example.com'))))],
+                    ['an uncompressed JSON', () => JSON.stringify(batchOf(recipient('gz@example.com')))],
+                ])(
+                    'answers %s body labelled gzip with 400, sends nothing from it, and keeps serving',
+                    async (_, bodyOf) => {
+                        const { app: own, port } = await servedWith({})
+                        const compressed = postRaw(port, { 'Content-Encoding': 'gzip' })
+                        const answered = new Promise<number>((resolve) =>
+                            compressed.on('response', (response) => {
+                                response.resume()
+                                resolve(response.statusCode ?? 0)
+                            })
+                        )
+                        compressed.end(bodyOf())
 
-                    expect(await answered).toEqual(400)
-                    const after = await sendBatchTo(own, TEMPLATE, batchOf(recipient('bo@example.com')))
-                    expect(after.status).toEqual(200)
-                })
+                        expect(await answered).toEqual(400)
+                        expect(await storedRuns()).toEqual([])
+                        const after = await sendBatchTo(own, TEMPLATE, batchOf(recipient('bo@example.com')))
+                        expect(after.status).toEqual(200)
+                    }
+                )
 
                 it('sends nothing from a body that grows past the size limit while it streams', async () => {
                     const { app: own, port } = await servedWith({})
