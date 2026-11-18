@@ -5776,16 +5776,30 @@ describe('CDP API', () => {
                     expect((await sendBatchTo(own, TEMPLATE, batchOf(recipient('cy@example.com')))).status).toEqual(200)
                 })
 
-                it('takes no admission for a request whose deadline setting cannot build a deadline', async () => {
-                    const { app: own } = await servedWith({
-                        CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_REQUESTS: 1,
-                        CDP_TRANSACTIONAL_EMAIL_BATCH_DEADLINE_MS: -1,
-                    })
+                it('refuses to start with a deadline that answers after Django gives up', () => {
+                    expect(
+                        () =>
+                            new CdpApi({ ...hub, CDP_TRANSACTIONAL_EMAIL_BATCH_DEADLINE_MS: 30_000 }, cdpDeps, {
+                                hogQueue: createMockJobQueue(),
+                                hogflowQueue: createMockJobQueue(),
+                            })
+                    ).toThrow('CDP_TRANSACTIONAL_EMAIL_BATCH_DEADLINE_MS')
+                })
 
-                    const first = await sendBatchTo(own, TEMPLATE, batchOf(recipient('ada@example.com')))
-                    const second = await sendBatchTo(own, TEMPLATE, batchOf(recipient('bo@example.com')))
+                it('answers a malformed compressed body with 400 and keeps serving', async () => {
+                    const { app: own, port } = await servedWith({})
+                    const compressed = postRaw(port, { 'Content-Encoding': 'gzip' })
+                    const answered = new Promise<number>((resolve) =>
+                        compressed.on('response', (response) => {
+                            response.resume()
+                            resolve(response.statusCode ?? 0)
+                        })
+                    )
+                    compressed.end('not a gzip stream')
 
-                    expect([first.status, second.status]).toEqual([500, 500])
+                    expect(await answered).toEqual(400)
+                    const after = await sendBatchTo(own, TEMPLATE, batchOf(recipient('bo@example.com')))
+                    expect(after.status).toEqual(200)
                 })
 
                 it('sends nothing from a body that grows past the size limit while it streams', async () => {

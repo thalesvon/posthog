@@ -14,6 +14,18 @@ export const CODE_SEND_BATCH_TOKEN_CLAIMS = { kind: 'code_send_batch' }
 export const BATCH_MAX_RECIPIENTS = 100
 export const BATCH_FAN_OUT = 25
 
+// Django drops a forwarded call after 30 s, so a batch that answers later returns none of its results.
+const DJANGO_FORWARD_TIMEOUT_MS = 30_000
+
+export const batchDeadlineMs = (setting: number): number => {
+    if (!Number.isInteger(setting) || setting <= 0 || setting >= DJANGO_FORWARD_TIMEOUT_MS) {
+        throw new Error(
+            `CDP_TRANSACTIONAL_EMAIL_BATCH_DEADLINE_MS must be a whole number of milliseconds from 1 to ${DJANGO_FORWARD_TIMEOUT_MS - 1}, got ${setting}`
+        )
+    }
+    return setting
+}
+
 const Variables = z.record(z.string(), z.any())
 const IdempotencyKey = z.string().min(1).max(255)
 

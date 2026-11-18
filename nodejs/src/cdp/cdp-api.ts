@@ -91,6 +91,7 @@ import {
     TEMPLATE_BATCH_TOKEN_CLAIMS,
     TemplateBatchRequestSchema,
     TransactionalEmailBatchRequest,
+    batchDeadlineMs,
     readBatchBody,
     runBatchSlots,
     slotRequestOf,
@@ -432,7 +433,10 @@ export class CdpApi {
     private manageTransactionalEmailJwt: ScopedServiceJwt
     private transactionalEmailIdempotencyKeys: IdempotencyKeys
     private transactionalEmailBatchCapacity: BatchCapacity
-    private transactionalEmailBatchBody = express.json({ limit: '20mb' })
+    private transactionalEmailBatchDeadlineMs: number
+    // Django sends a batch uncompressed. ultimate-express inflates a compressed body in a socket callback that nothing
+    // catches, so a malformed compressed body would crash the pod.
+    private transactionalEmailBatchBody = express.json({ limit: '20mb', inflate: false })
     private attachmentUploads: AttachmentUploads
     private emailSuppressionService: EmailSuppressionService
     private emailValidationService: EmailValidationService
@@ -446,6 +450,7 @@ export class CdpApi {
         jobQueues: { hogQueue: JobQueue; hogflowQueue: IdempotentJobQueue },
         batchResolverProducer: CyclotronV2JobProducer | null = null
     ) {
+        this.transactionalEmailBatchDeadlineMs = batchDeadlineMs(config.CDP_TRANSACTIONAL_EMAIL_BATCH_DEADLINE_MS)
         const services = createCdpCoreServices(config, deps, 'cdp-api-redis')
 
         this.hogFunctionManager = services.hogFunctionManager
@@ -1687,7 +1692,7 @@ export class CdpApi {
                 transactionalEmailBatchRequestsTotal.inc({ outcome: 'unauthorized' })
                 return
             }
-            const deadline = deadlineAfter(this.config.CDP_TRANSACTIONAL_EMAIL_BATCH_DEADLINE_MS)
+            const deadline = deadlineAfter(this.transactionalEmailBatchDeadlineMs)
             const release = this.transactionalEmailBatchCapacity.admit()
             if (!release) {
                 return refuse('over_capacity', 503, { error: 'over_capacity' })

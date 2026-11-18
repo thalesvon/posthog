@@ -4,6 +4,7 @@ import {
     BatchSlot,
     SlotReply,
     TemplateBatchRequestSchema,
+    batchDeadlineMs,
     runBatchSlots,
 } from './transactional-email-batch'
 
@@ -144,6 +145,16 @@ describe('BatchCapacity', () => {
 
         expect(capacity.admit()).not.toBeNull()
         expect(capacity.admit()).toBeNull()
+    })
+})
+
+describe('batchDeadlineMs', () => {
+    it.each([-1, 0, 2.5, 30_000])('refuses a deadline of %s ms', (setting) => {
+        expect(() => batchDeadlineMs(setting)).toThrow('CDP_TRANSACTIONAL_EMAIL_BATCH_DEADLINE_MS')
+    })
+
+    it('keeps a deadline that answers before Django gives up', () => {
+        expect(batchDeadlineMs(29_999)).toBe(29_999)
     })
 })
 
