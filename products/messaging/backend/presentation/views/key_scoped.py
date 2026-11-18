@@ -10,6 +10,7 @@ from rest_framework.decorators import action
 from rest_framework.exceptions import UnsupportedMediaType
 from rest_framework.parsers import JSONParser
 from rest_framework.response import Response
+from rest_framework.utils.mediatypes import media_type_matches
 
 from posthog.rate_limit import reserve_units
 
@@ -56,7 +57,7 @@ class KeyScopedMessagingSendViewSet(MessagingSendViewSet):
 
     def initial(self, request: Any, *args: Any, **kwargs: Any) -> None:
         super().initial(request, *args, **kwargs)
-        if self.action == "email_batch" and request.content_type.split(";")[0].strip() != JSONParser.media_type:
+        if self.action == "email_batch" and not media_type_matches(JSONParser.media_type, request.content_type):
             raise UnsupportedMediaType(request.content_type)
 
     @extend_schema(
@@ -73,7 +74,9 @@ class KeyScopedMessagingSendViewSet(MessagingSendViewSet):
             "`transactional_email:write` scope."
         ),
     )
-    @action(detail=False, methods=["POST"], required_scopes=[TRANSACTIONAL_EMAIL_SEND_SCOPE])
+    @action(
+        detail=False, methods=["POST"], parser_classes=[JSONParser], required_scopes=[TRANSACTIONAL_EMAIL_SEND_SCOPE]
+    )
     def email_batch(self, request: Any, *args: Any, **kwargs: Any) -> Response:
         body_bytes = len(request.body)
         batch_id = str(uuid4())

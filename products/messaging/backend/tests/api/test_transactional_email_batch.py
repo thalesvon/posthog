@@ -201,7 +201,9 @@ class TestTransactionalEmailBatch(APIBaseTest):
             match = re.fullmatch(r"(\d+)/hog_flows/([^/]+)/transactional_email(.*)", path)
             assert match is not None
             team_id, hog_flow_id, route = match.groups()
-            claims = WORKFLOWS_TRANSACTIONAL_EMAIL_JWT_PURPOSE.verify(call.kwargs["headers"]["Authorization"][7:])
+            scheme, token = call.kwargs["headers"]["Authorization"].split(" ", 1)
+            assert scheme == "Bearer"
+            claims = WORKFLOWS_TRANSACTIONAL_EMAIL_JWT_PURPOSE.verify(token)
             assert (claims["team_id"], claims["hog_flow_id"]) == (int(team_id), hog_flow_id)
             assert call.kwargs["headers"].get("Content-Encoding", "identity") == "identity"
             forwards.append((route, claims.get("kind")))
@@ -265,6 +267,13 @@ class TestTransactionalEmailBatch(APIBaseTest):
                 400,
                 "recipients",
             ),
+            (
+                "too_many_recipients_with_a_refused_field",
+                "code",
+                {"recipients": [{**RECIPIENT, "cc": []}] + [RECIPIENT] * 100},
+                400,
+                "recipients",
+            ),
             ("shared_scheduled_at", "code", {"scheduled_at": "2030-01-01T00:00:00Z"}, 400, "scheduled_at"),
             ("shared_attachments", "template", {"attachments": []}, 400, "attachments"),
             ("recipient_cc", "code", {"recipients": [{**RECIPIENT, "cc": []}]}, 400, "recipients__0__cc"),
@@ -288,6 +297,21 @@ class TestTransactionalEmailBatch(APIBaseTest):
         assert response.status_code == expected_status, response.json()
         assert response.json()["attr"] == attr
         mock_post.assert_not_called()
+
+    @parameterized.expand(
+        [
+            ("the_most_recipients_a_batch_takes", 100, "application/json"),
+            ("a_json_media_type_in_any_case", 2, "Application/JSON; charset=utf-8"),
+        ]
+    )
+    def test_queues_every_recipient_of_a_json_batch(self, mock_post, _flag, _capture, _name, count, content_type):
+        mock_post.return_value = _batch_answer(*[ACCEPTED] * count)
+        body = {**self._email("template"), "recipients": self._recipients(count)}
+
+        response = self.psak.post(BATCH_URL, json.dumps(body), content_type=content_type)
+
+        assert response.status_code == status.HTTP_200_OK, response.json()
+        assert [result["status"] for result in response.json()["results"]] == ["queued"] * count
 
     def test_refuses_a_form_encoded_batch(self, mock_post, _flag, _capture):
         response = self.psak.post(

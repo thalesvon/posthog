@@ -200,7 +200,9 @@ def refused_batch_field(data: Any, *, takes_template_key: bool) -> ExplainedRefu
     if field := next((field for field in BATCH_REFUSED_FIELDS if field in data), None):
         return _field_refusal(field)
     recipients = data.get("recipients")
-    for index, recipient in enumerate(recipients[:BATCH_MAX_RECIPIENTS] if isinstance(recipients, list) else []):
+    if not isinstance(recipients, list) or len(recipients) > BATCH_MAX_RECIPIENTS:
+        return None
+    for index, recipient in enumerate(recipients):
         if not isinstance(recipient, Mapping):
             continue
         if field := next((field for field in BATCH_REFUSED_FIELDS if field in recipient), None):
