@@ -4,6 +4,7 @@ from typing import Any
 from drf_spectacular.utils import OpenApiResponse
 from rest_framework import serializers, status
 
+from posthog.api.fields import LengthFirstListField
 from posthog.api.mixins import ResponseDeclaration
 from posthog.enums import LabeledStrEnum
 
@@ -72,7 +73,7 @@ class EmailBatchRecipientSerializer(serializers.Serializer):
         return value
 
 
-class EmailBatchRecipientsField(serializers.ListField):
+class EmailBatchRecipientsField(LengthFirstListField):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(
             child=EmailBatchRecipientSerializer(), allow_empty=False, max_length=BATCH_MAX_RECIPIENTS, **kwargs
@@ -199,7 +200,7 @@ def refused_batch_field(data: Any, *, takes_template_key: bool) -> ExplainedRefu
     if field := next((field for field in BATCH_REFUSED_FIELDS if field in data), None):
         return _field_refusal(field)
     recipients = data.get("recipients")
-    for index, recipient in enumerate(recipients if isinstance(recipients, list) else []):
+    for index, recipient in enumerate(recipients[:BATCH_MAX_RECIPIENTS] if isinstance(recipients, list) else []):
         if not isinstance(recipient, Mapping):
             continue
         if field := next((field for field in BATCH_REFUSED_FIELDS if field in recipient), None):

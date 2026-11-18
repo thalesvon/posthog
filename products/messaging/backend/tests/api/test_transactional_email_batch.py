@@ -1,3 +1,4 @@
+import re
 import json
 from typing import Any
 
@@ -194,21 +195,21 @@ class TestTransactionalEmailBatch(APIBaseTest):
         self._batch("template")
         self._batch("code")
 
-        forwards = [
-            (
-                call.args[0].split("/transactional_email")[1],
-                WORKFLOWS_TRANSACTIONAL_EMAIL_JWT_PURPOSE.verify(call.kwargs["headers"]["Authorization"][7:]).get(
-                    "kind"
-                ),
-                call.kwargs["timeout"],
-            )
-            for call in mock_post.call_args_list
-        ]
+        forwards = []
+        for call in mock_post.call_args_list:
+            path = call.args[0].split("/api/projects/")[1]
+            match = re.fullmatch(r"(\d+)/hog_flows/([^/]+)/transactional_email(.*)", path)
+            assert match is not None
+            team_id, hog_flow_id, route = match.groups()
+            claims = WORKFLOWS_TRANSACTIONAL_EMAIL_JWT_PURPOSE.verify(call.kwargs["headers"]["Authorization"][7:])
+            assert (claims["team_id"], claims["hog_flow_id"]) == (int(team_id), hog_flow_id)
+            assert call.kwargs["headers"].get("Content-Encoding", "identity") == "identity"
+            forwards.append((route, claims.get("kind")))
         assert forwards == [
-            ("", None, 10),
-            ("/send", "code_send", 10),
-            ("/batch", "template_batch", 30),
-            ("/send/batch", "code_send_batch", 30),
+            ("", None),
+            ("/send", "code_send"),
+            ("/batch", "template_batch"),
+            ("/send/batch", "code_send_batch"),
         ]
 
     def test_a_recipient_the_pipeline_cannot_address_fails_only_its_own_result(self, mock_post, _flag, _capture):
@@ -257,6 +258,13 @@ class TestTransactionalEmailBatch(APIBaseTest):
                 400,
                 "recipients",
             ),
+            (
+                "too_many_recipients_before_their_fields",
+                "template",
+                {"recipients": [{"to": "a@example.com"} for _ in range(101)]},
+                400,
+                "recipients",
+            ),
             ("shared_scheduled_at", "code", {"scheduled_at": "2030-01-01T00:00:00Z"}, 400, "scheduled_at"),
             ("shared_attachments", "template", {"attachments": []}, 400, "attachments"),
             ("recipient_cc", "code", {"recipients": [{**RECIPIENT, "cc": []}]}, 400, "recipients__0__cc"),
@@ -279,6 +287,14 @@ class TestTransactionalEmailBatch(APIBaseTest):
 
         assert response.status_code == expected_status, response.json()
         assert response.json()["attr"] == attr
+        mock_post.assert_not_called()
+
+    def test_refuses_a_form_encoded_batch(self, mock_post, _flag, _capture):
+        response = self.psak.post(
+            BATCH_URL, {"template_id": str(self.template.id), "recipients[0]to": "a@example.com"}, format="multipart"
+        )
+
+        assert response.status_code == status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, response.json()
         mock_post.assert_not_called()
 
     def test_a_duplicate_key_names_both_recipients(self, mock_post, _flag, _capture):

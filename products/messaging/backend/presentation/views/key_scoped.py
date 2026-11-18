@@ -7,6 +7,8 @@ from uuid import uuid4
 from drf_spectacular.utils import extend_schema
 from rest_framework import status
 from rest_framework.decorators import action
+from rest_framework.exceptions import UnsupportedMediaType
+from rest_framework.parsers import JSONParser
 from rest_framework.response import Response
 
 from posthog.rate_limit import reserve_units
@@ -51,6 +53,11 @@ class KeyScopedMessagingSendViewSet(MessagingSendViewSet):
     team_from_project_secret_api_key = True
     psak_allowed_actions = ["email", "email_batch"]
     transactional_email_send_actions = ("email", "email_batch")
+
+    def initial(self, request: Any, *args: Any, **kwargs: Any) -> None:
+        super().initial(request, *args, **kwargs)
+        if self.action == "email_batch" and request.content_type.split(";")[0].strip() != JSONParser.media_type:
+            raise UnsupportedMediaType(request.content_type)
 
     @extend_schema(
         request=SendEmailBatchSerializer,
