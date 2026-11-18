@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { GATEWAY_PRODUCTS, type GatewayProduct } from "../../utils/gateway";
 
 export interface RunPolicy {
   readonly finishTool: boolean;
@@ -9,6 +10,7 @@ export interface RunPolicy {
   readonly expectsSystemPrompt: boolean;
   readonly threadLink: boolean;
   readonly defaultClientProvenance: string | undefined;
+  readonly billingProduct: GatewayProduct | undefined;
 }
 
 export interface RunPolicyInput {
@@ -31,6 +33,7 @@ const serverRunPolicySchema = z.object({
   expects_system_prompt: z.boolean(),
   thread_link: z.boolean(),
   default_client_provenance: z.string().nullable(),
+  billing_product: z.enum(GATEWAY_PRODUCTS).optional().catch(undefined),
 });
 
 export function parseServerRunPolicy(raw: string): ServerRunPolicy | undefined {
@@ -52,6 +55,7 @@ export function parseServerRunPolicy(raw: string): ServerRunPolicy | undefined {
     expectsSystemPrompt: parsed.data.expects_system_prompt,
     threadLink: parsed.data.thread_link,
     defaultClientProvenance: parsed.data.default_client_provenance ?? undefined,
+    billingProduct: parsed.data.billing_product,
   };
   return { runId: parsed.data.run_id, policy };
 }
@@ -105,5 +109,6 @@ export function runPolicyFromOrigin({
     threadLink: THREAD_ORIGINS.has(origin),
     // Browser session auth records no provenance, so a posthog_ai task without one comes from the web.
     defaultClientProvenance: posthogAi ? "posthog_web" : undefined,
+    billingProduct: undefined,
   };
 }
