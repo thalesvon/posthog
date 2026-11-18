@@ -1,3 +1,4 @@
+import { EventEmitter } from 'events'
 import { Counter, Histogram } from 'prom-client'
 import { z } from 'zod'
 
@@ -5,36 +6,37 @@ import { logger } from '~/common/utils/logger'
 
 import { Settlement } from '../../intake/intake-producer'
 import { Semaphore } from '../../utils/sempahore'
-import { BatchSendSchema, TransactionalEmailRequestSchema } from './transactional-email'
+import { BatchSendSchema, TransactionalEmailOutcome, TransactionalEmailRequestSchema } from './transactional-email'
 
 export const TEMPLATE_BATCH_TOKEN_CLAIMS = { kind: 'template_batch' }
 export const CODE_SEND_BATCH_TOKEN_CLAIMS = { kind: 'code_send_batch' }
 
 export const BATCH_MAX_RECIPIENTS = 100
 export const BATCH_FAN_OUT = 25
-// Below Django's 30 s forward timeout, so a stuck recipient never costs the caller the other recipients' answers.
-export const BATCH_RESPONSE_DEADLINE_MS = 20_000
 
 const Variables = z.record(z.string(), z.any())
 const IdempotencyKey = z.string().min(1).max(255)
 
 // The address and the person are checked per recipient, so one bad recipient refuses only its own slot.
-const BatchRecipient = z.object({ to: z.string(), distinct_id: z.string(), idempotency_key: IdempotencyKey })
+const BatchRecipient = z.object({ to: z.unknown(), distinct_id: z.unknown(), idempotency_key: IdempotencyKey })
 
 const hasUniqueKeys = (recipients: { idempotency_key: string }[]): boolean =>
     new Set(recipients.map((recipient) => recipient.idempotency_key)).size === recipients.length
-const UNIQUE_KEYS = { message: 'idempotency_key must be unique within a batch' }
+
+// The length is checked before any recipient, so an oversized list costs one issue, not one per entry.
+const recipientsOf = <T extends { idempotency_key: string }>(recipient: z.ZodType<T>) =>
+    z
+        .array(z.unknown())
+        .min(1)
+        .max(BATCH_MAX_RECIPIENTS)
+        .pipe(z.array(recipient).refine(hasUniqueKeys, { message: 'idempotency_key must be unique within a batch' }))
 
 // What Django sends to run one email for many recipients. Strict, so a field a batch never takes (a send time, copies,
 // attachments) refuses the whole call instead of reaching a recipient's run.
 export const TemplateBatchRequestSchema = z
     .object({
         variables: Variables.default({}),
-        recipients: z
-            .array(BatchRecipient.extend({ variables: Variables.optional() }).strict())
-            .min(1)
-            .max(BATCH_MAX_RECIPIENTS)
-            .refine(hasUniqueKeys, UNIQUE_KEYS),
+        recipients: recipientsOf(BatchRecipient.extend({ variables: Variables.optional() }).strict()),
     })
     .strict()
 
@@ -42,22 +44,17 @@ export const CodeSendBatchRequestSchema = z
     .object({
         variables: Variables.default({}),
         send: BatchSendSchema,
-        recipients: z
-            .array(BatchRecipient.strict())
-            .min(1)
-            .max(BATCH_MAX_RECIPIENTS)
-            .refine(hasUniqueKeys, UNIQUE_KEYS),
+        recipients: recipientsOf(BatchRecipient.strict()),
     })
     .strict()
 
 export type TransactionalEmailBatchRequest = {
     variables: Record<string, any>
     send?: z.infer<typeof BatchSendSchema>
-    recipients: { to: string; distinct_id: string; idempotency_key: string; variables?: Record<string, any> }[]
+    recipients: { to?: unknown; distinct_id?: unknown; idempotency_key: string; variables?: Record<string, any> }[]
 }
 export type BatchRecipient = TransactionalEmailBatchRequest['recipients'][number]
 
-// One recipient's send, checked as a single send is.
 export const BatchSlotRequestSchema = TransactionalEmailRequestSchema.omit({ scheduled_at: true }).extend({
     idempotency_key: IdempotencyKey,
     send: BatchSendSchema.optional(),
@@ -72,7 +69,8 @@ export const slotRequestOf = (batch: TransactionalEmailBatchRequest, recipient: 
     ...(batch.send && { send: batch.send }),
 })
 
-export type SlotReply = { outcome: string; status: number; body: Record<string, unknown> }
+export type SlotOutcome = TransactionalEmailOutcome | 'not_sendable' | 'deadline_running' | 'not_attempted'
+export type SlotReply = { outcome: SlotOutcome; status: number; body: Record<string, unknown> }
 
 export type BatchSlot = {
     settlement: Settlement
@@ -81,7 +79,7 @@ export type BatchSlot = {
 }
 
 export const NOT_ATTEMPTED: SlotReply = { outcome: 'not_attempted', status: 503, body: { error: 'not_attempted' } }
-const unconfirmed = (outcome: string): SlotReply => ({
+const unconfirmed = (outcome: SlotOutcome): SlotReply => ({
     outcome,
     status: 503,
     body: { error: 'delivery_unavailable', may_still_go_out: true },
@@ -94,7 +92,7 @@ const FAILED_BEFORE_COMMIT: SlotReply = {
 
 export const transactionalEmailBatchRequestsTotal = new Counter({
     name: 'cdp_transactional_email_batch_requests_total',
-    help: 'Batch email requests from Django, by outcome: answered (with a result per recipient), over_capacity (the pod already ran its share of batches), or a whole-call refusal before any recipient ran. Recipients count in cdp_transactional_email_requests_total with route batch.',
+    help: 'Batch email requests from Django, by outcome: answered (with a result per recipient), over_capacity (the pod already ran its share of batches), abandoned (the caller left before its body arrived), or a whole-call refusal before any recipient ran. Recipients count in cdp_transactional_email_requests_total with route batch.',
     labelNames: ['outcome'],
 })
 
@@ -104,8 +102,6 @@ export const transactionalEmailBatchDurationMs = new Histogram({
     buckets: [10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, 15_000, 20_000, 30_000],
 })
 
-// The pod's share of batch work: a request cap that bounds parsed bodies in memory, and a recipient cap across
-// requests that bounds the load on the claim store, the queue and the intake topics.
 export class BatchCapacity {
     readonly slots: Semaphore
     private admitted = 0
@@ -117,7 +113,6 @@ export class BatchCapacity {
         this.slots = new Semaphore(maxSlots)
     }
 
-    // Null when the pod is at its request cap. The caller releases once every recipient has settled.
     admit(): (() => void) | null {
         if (this.admitted >= this.maxRequests) {
             return null
@@ -133,14 +128,45 @@ export class BatchCapacity {
     }
 }
 
+export type BodyRead = 'parsed' | 'too_large' | 'invalid_request' | 'abandoned' | 'deadline_exceeded'
+
+// The parser calls back once per chunk past its size limit and again at the end of the body, and never when the
+// caller leaves, so the first of these ends the read and frees the request's admission from a late callback.
+export const readBatchBody = (
+    parse: (done: (error?: unknown) => void) => void,
+    { connection, deadline }: { connection: EventEmitter | null; deadline: AbortSignal }
+): Promise<BodyRead> =>
+    new Promise((resolve) => {
+        const end = (read: BodyRead): void => {
+            connection?.off('close', abandoned)
+            deadline.removeEventListener('abort', expired)
+            resolve(read)
+        }
+        const abandoned = (): void => end('abandoned')
+        const expired = (): void => end('deadline_exceeded')
+        if (deadline.aborted) {
+            return end('deadline_exceeded')
+        }
+        connection?.once('close', abandoned)
+        deadline.addEventListener('abort', expired, { once: true })
+        parse((error) =>
+            end(
+                !error
+                    ? 'parsed'
+                    : error instanceof Error && error.message === 'Request entity too large'
+                      ? 'too_large'
+                      : 'invalid_request'
+            )
+        )
+    })
+
 const whenAborted = (signal: AbortSignal): Promise<void> =>
     new Promise((resolve) =>
         signal.aborted ? resolve() : signal.addEventListener('abort', () => resolve(), { once: true })
     )
 
-// Runs each recipient `fanOut` at a time, each within a slot permit, and answers by the deadline: a recipient still
-// running answers "may still go out", and one not started answers not_attempted. A recipient that runs past the
-// deadline keeps running, and holds its permit until it and its publishes settle; `settled` resolves then.
+// Answers by the deadline: a recipient still running "may still go out", and one not started is not_attempted. A
+// recipient past the deadline keeps running and holds its permit until it and its publishes settle, as `settled` does.
 export const runBatchSlots = async <T>(
     items: readonly T[],
     runSlot: (item: T, slot: BatchSlot) => Promise<SlotReply>,

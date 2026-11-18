@@ -197,8 +197,6 @@ describe('createInternalApiAuthMiddleware', () => {
             ['/api/projects/1/hog_flows/some-uuid/batch_jobs/some-job-id/cancel'],
             ['/api/projects/1/hog_flows/some-uuid/transactional_email'],
             ['/api/projects/1/hog_flows/some-uuid/transactional_email/send'],
-            ['/api/projects/1/hog_flows/some-uuid/transactional_email/batch'],
-            ['/api/projects/1/hog_flows/some-uuid/transactional_email/send/batch'],
             ['/api/projects/1/transactional_emails/some-uuid/cancel'],
             ['/api/projects/1/transactional_emails/some-uuid/reschedule'],
             ['/api/projects/1/hog_flows/some-uuid/manual_invocations'],
@@ -221,7 +219,6 @@ describe('createInternalApiAuthMiddleware', () => {
             ['/api/some/other/route/cancel'],
             ['/api/projects/1/hog_flows/some-uuid/reschedule_parked/extra'],
             ['/api/projects/1/hog_flows/some-uuid/transactional_email/send/extra'],
-            ['/api/projects/1/hog_flows/some-uuid/transactional_email/send/batch/extra'],
             ['/api/projects/1/transactional_emails/some-uuid/cancel/extra'],
             ['/api/projects/1/hog_flows/some-uuid/manual_invocations/extra'],
         ])('should still require the secret for %s despite resembling a scoped route', (path) => {

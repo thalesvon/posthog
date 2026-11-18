@@ -5,7 +5,7 @@ import { mockFetch } from '../../tests/helpers/mocks/request.mock'
 
 import { KafkaProducerObserver } from '~/tests/helpers/mocks/producer.spy'
 
-import { Server } from 'http'
+import http, { Server } from 'http'
 import jwt from 'jsonwebtoken'
 import { DateTime } from 'luxon'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
@@ -79,7 +79,6 @@ import {
     transactionalEmailRequestsTotal,
     transactionalEmailStageDurationMs,
 } from './services/hogflows/transactional-email'
-import { BatchCapacity } from './services/hogflows/transactional-email-batch'
 import { FINGERPRINT_PURPOSE } from './services/hogflows/transactional-sends'
 import { CyclotronJobQueuePostgresV2 } from './services/job-queue/job-queue-postgres-v2'
 import { SEND_NEEDS_FILES_FOR_MS } from './services/messaging/attachment-horizon'
@@ -102,7 +101,7 @@ import {
 import { BASE_REDIS_KEY, HogWatcherState } from './services/monitoring/hog-watcher.service'
 import { template as emailTemplate } from './templates/_destinations/email/email.template'
 import { compileHog } from './templates/compiler'
-import { CyclotronJobInvocationHogFlow, HogFunctionInvocationGlobals, HogFunctionType } from './types'
+import { HogFunctionInvocationGlobals, HogFunctionType } from './types'
 import { EMAIL_BODY_TAG_LIMIT, LIQUID_RENDER_LIMIT_MS } from './utils/liquid'
 
 // Email MX validation runs on every email send, so without a mock the test-panel
@@ -2758,7 +2757,11 @@ describe('CDP API', () => {
         const stageCounts = async (): Promise<Record<string, number>> =>
             Object.fromEntries(
                 (await transactionalEmailStageDurationMs.get()).values
-                    .filter((v) => v.metricName === 'cdp_transactional_email_stage_duration_ms_count')
+                    .filter(
+                        (v) =>
+                            v.metricName === 'cdp_transactional_email_stage_duration_ms_count' &&
+                            v.labels.route === 'single'
+                    )
                     .map((v) => [String(v.labels.stage), v.value])
             )
         const stageCountChanges = (before: Record<string, number>, after: Record<string, number>) =>
@@ -5417,22 +5420,37 @@ describe('CDP API', () => {
             const TEMPLATE: BatchRoute = 'transactional_email/batch'
             const CODE: BatchRoute = 'transactional_email/send/batch'
             const kindOf = (route: BatchRoute) => (route === CODE ? 'code_send_batch' : 'template_batch')
+            const pathOf = (route: BatchRoute) => `/api/projects/${team.id}/hog_flows/${hogFlow.id}/${route}`
             // A null kind mints the single template send's token, which carries no kind.
-            const sendBatch = (route: BatchRoute, payload: unknown, kind: string | null = kindOf(route)) =>
-                supertest(app)
-                    .post(`/api/projects/${team.id}/hog_flows/${hogFlow.id}/${route}`)
-                    .set({
-                        Authorization: `Bearer ${mintToken(team.id, hogFlow.id, { claims: kind ? { kind } : {} })}`,
-                    })
+            const authorizationFor = (kind: string | null) =>
+                `Bearer ${mintToken(team.id, hogFlow.id, { claims: kind ? { kind } : {} })}`
+            const sendBatchTo = (
+                served: express.Application,
+                route: BatchRoute,
+                payload: unknown,
+                kind: string | null = kindOf(route)
+            ) =>
+                supertest(served)
+                    .post(pathOf(route))
+                    .set({ Authorization: authorizationFor(kind) })
                     .send(payload as object)
+            const sendBatch = (route: BatchRoute, payload: unknown, kind?: string | null) =>
+                sendBatchTo(app, route, payload, kind)
             const recipient = (to: string, extra: Record<string, unknown> = {}) => ({
                 to,
                 distinct_id: `person-${to}`,
                 idempotency_key: `key-${new UUIDT().toString()}`,
                 ...extra,
             })
-            const queuedRuns = (): CyclotronJobInvocationHogFlow[] =>
-                mockQueueInvocations.mock.calls.flatMap(([invocations]) => invocations)
+            const storedRuns = async (): Promise<{ id: string; to: string; variables: Record<string, unknown> }[]> => {
+                const { rows } = await cyclotron.query(
+                    `SELECT id, state FROM cyclotron_jobs WHERE queue_name = 'email' ORDER BY created`
+                )
+                return rows.map((row) => {
+                    const { state } = parseJSON(row.state.toString())
+                    return { id: row.id, to: state.event.properties.to, variables: state.variables }
+                })
+            }
             const queued = expect.objectContaining({
                 status: 'queued',
                 invocation_id: expect.any(String),
@@ -5440,12 +5458,17 @@ describe('CDP API', () => {
             })
             const stillRunning = { status: 503, body: { error: 'delivery_unavailable', may_still_go_out: true } }
 
-            it('queues one run per recipient with its own data, and answers each recipient in request order', async () => {
+            beforeEach(async () => {
+                await useRealQueue()
+            })
+
+            it('stores one run per recipient with its own data, and answers each recipient in request order', async () => {
                 const res = await sendBatch(TEMPLATE, {
                     variables: { reset_link: 'https://example.com/reset', name: 'there' },
                     recipients: [
                         recipient('ada@example.com', { variables: { name: 'Ada' } }),
                         recipient('not-an-address'),
+                        recipient('cy@example.com', { distinct_id: null }),
                         recipient('bo@example.com'),
                     ],
                 })
@@ -5454,36 +5477,36 @@ describe('CDP API', () => {
                 expect(res.body.results).toEqual([
                     { status: 202, body: queued },
                     { status: 422, body: { error: 'recipient_unreachable' } },
+                    { status: 400, body: { error: expect.any(String) } },
                     { status: 202, body: queued },
                 ])
-                expect(queuedRuns().map((run) => [run.id, run.state.event.properties.to, run.state.variables])).toEqual(
+                expect(await storedRuns()).toEqual(
                     expect.arrayContaining([
-                        [
-                            res.body.results[0].body.invocation_id,
-                            'ada@example.com',
-                            { reset_link: 'https://example.com/reset', name: 'Ada' },
-                        ],
-                        [
-                            res.body.results[2].body.invocation_id,
-                            'bo@example.com',
-                            { reset_link: 'https://example.com/reset', name: 'there' },
-                        ],
+                        {
+                            id: res.body.results[0].body.invocation_id,
+                            to: 'ada@example.com',
+                            variables: { reset_link: 'https://example.com/reset', name: 'Ada' },
+                        },
+                        {
+                            id: res.body.results[3].body.invocation_id,
+                            to: 'bo@example.com',
+                            variables: { reset_link: 'https://example.com/reset', name: 'there' },
+                        },
                     ])
                 )
-                expect(queuedRuns()).toHaveLength(2)
+                expect(await storedRuns()).toHaveLength(2)
             })
 
             it.each([
-                ['disabled', (flow: HogFlow) => ({ ...flow, status: 'draft' as const })],
-                ['gone', () => null],
+                ['disabled', `UPDATE posthog_hogflow SET status = 'draft' WHERE id = $1`],
+                ['gone', `DELETE FROM posthog_hogflow WHERE id = $1`],
             ])(
                 'replays the accepted recipients of a retry after the workflow is %s, and refuses each new one',
-                async (_case, changed) => {
+                async (_case, change) => {
                     const accepted = [recipient('ada@example.com'), recipient('bo@example.com')]
                     const first = await sendBatch(TEMPLATE, { variables: body.variables, recipients: accepted })
-                    jest.spyOn(api['hogFlowManager'], 'getHogFlowCheckingPrimaryOnMiss').mockResolvedValue(
-                        changed(hogFlow)
-                    )
+                    await hub.postgres.query(PostgresUse.COMMON_WRITE, change, [hogFlow.id], 'change-workflow')
+                    api['hogFlowManager']['onHogFlowsReloaded'](team.id, [hogFlow.id])
 
                     const retry = await sendBatch(TEMPLATE, {
                         variables: body.variables,
@@ -5509,7 +5532,7 @@ describe('CDP API', () => {
                         invocation_id: first.body.results[0].body.invocation_id,
                         replayed: true,
                     })
-                    expect(queuedRuns()).toHaveLength(2)
+                    expect(await storedRuns()).toHaveLength(2)
                 }
             )
 
@@ -5521,7 +5544,7 @@ describe('CDP API', () => {
                 const res = await sendBatch(route, { recipients: [recipient('ada@example.com')] }, kind)
 
                 expect(res.status).toEqual(401)
-                expect(queuedRuns()).toEqual([])
+                expect(await storedRuns()).toEqual([])
             })
 
             it.each([
@@ -5536,18 +5559,19 @@ describe('CDP API', () => {
                 )
 
                 expect(res.status).toEqual(401)
-                expect(queuedRuns()).toEqual([])
+                expect(await storedRuns()).toEqual([])
             })
 
             it.each([
-                ['off', '', '', TEMPLATE, 2, 0],
-                ['shadow', 'shadow', '', CODE, 2, 2],
-                ['async', '', 'async', CODE, 0, 2],
+                ['off', '', '', TEMPLATE, true, false],
+                ['shadow', 'shadow', '', CODE, true, true],
+                ['async', '', 'async', CODE, false, true],
             ])(
                 'sends each recipient as its own run with its team in intake mode %s',
-                async (_mode, shadow, async, route, inserted, produced) => {
+                async (_mode, shadow, async, route, inserts, produces) => {
                     api['config'].CDP_INTAKE_KAFKA_SHADOW_TEAMS = shadow ? String(team.id) : ''
                     api['config'].CDP_INTAKE_KAFKA_ASYNC_TEAMS = async ? String(team.id) : ''
+                    const produced = observeKafka()
                     try {
                         const res = await sendBatch(route, {
                             ...(route === CODE ? { send: codeSend } : { variables: body.variables }),
@@ -5558,10 +5582,16 @@ describe('CDP API', () => {
                             { status: 202, body: queued },
                             { status: 202, body: queued },
                         ])
-                        expect(queuedRuns()).toHaveLength(inserted)
+                        const runIds = res.body.results.map(({ body }: { body: { invocation_id: string } }) =>
+                            String(body.invocation_id)
+                        )
+                        expect((await storedRuns()).map(({ id }) => id).sort()).toEqual(inserts ? runIds.sort() : [])
                         expect(
-                            produceOutput.mock.calls.filter(([output]) => output === 'cdp_intake_transactional_email')
-                        ).toHaveLength(produced)
+                            produced()
+                                .filter((message) => message.kind === 'transactional-email')
+                                .map((message) => message.job.id)
+                                .sort()
+                        ).toEqual(produces ? runIds.sort() : [])
                     } finally {
                         api['config'].CDP_INTAKE_KAFKA_SHADOW_TEAMS = ''
                         api['config'].CDP_INTAKE_KAFKA_ASYNC_TEAMS = ''
@@ -5569,62 +5599,191 @@ describe('CDP API', () => {
                 }
             )
 
-            describe('at the limits of the pod', () => {
-                let capacity: BatchCapacity
-                beforeEach(() => {
-                    capacity = api['transactionalEmailBatchCapacity']
+            it('answers a retryable refusal that nothing went out when the team lookup fails', async () => {
+                jest.spyOn(api['deps'].teamManager, 'getTeam').mockRejectedValue(new Error('connection reset'))
+
+                const res = await sendBatch(TEMPLATE, {
+                    variables: body.variables,
+                    recipients: [recipient('ada@example.com')],
                 })
-                afterEach(() => {
-                    api['transactionalEmailBatchCapacity'] = capacity
-                    api['transactionalEmailBatchDeadlineMs'] = 20_000
+
+                expect(res.body.results).toEqual([
+                    { status: 503, body: { error: 'delivery_unavailable', may_still_go_out: false } },
+                ])
+                expect(await storedRuns()).toEqual([])
+            })
+
+            describe('on a pod of its own', () => {
+                const served: { cdpApi: CdpApi; server: Server }[] = []
+                const servedWith = async (
+                    settings: Partial<Hub>,
+                    options: Parameters<typeof setupExpressApp>[0] = {}
+                ): Promise<{ app: express.Application; port: number }> => {
+                    const ownQueue = new CyclotronJobQueuePostgresV2(100, hub)
+                    await ownQueue.startAsProducer()
+                    const cdpApi = new CdpApi(
+                        { ...hub, ...settings },
+                        { ...cdpDeps, idempotencyValkey: createIdempotencyValkeyPool(hub) },
+                        { hogQueue: createMockJobQueue(), hogflowQueue: ownQueue }
+                    )
+                    const ownApp = setupExpressApp(options)
+                    ownApp.use('/', cdpApi.router())
+                    let port = 0
+                    await new Promise<void>((listening) => {
+                        served.push({
+                            cdpApi,
+                            server: ownApp.listen(0, () => {
+                                port = (ownApp as unknown as { port: number }).port
+                                listening()
+                            }),
+                        })
+                    })
+                    return { app: ownApp, port }
+                }
+                const batchOf = (...recipients: Record<string, unknown>[]) => ({
+                    variables: body.variables,
+                    recipients,
+                })
+                const postRaw = (port: number, headers: Record<string, string> = {}) => {
+                    const request = http.request({
+                        host: '127.0.0.1',
+                        port,
+                        method: 'POST',
+                        path: pathOf(TEMPLATE),
+                        headers: {
+                            Authorization: authorizationFor('template_batch'),
+                            'Content-Type': 'application/json',
+                            ...headers,
+                        },
+                    })
+                    request.on('error', () => {})
+                    return request
+                }
+
+                afterEach(async () => {
+                    await Promise.all(
+                        served.splice(0).map(({ cdpApi, server }) => {
+                            server.close()
+                            return cdpApi.stop()
+                        })
+                    )
                 })
 
                 it('refuses a request over the request cap before it parses the body', async () => {
-                    api['transactionalEmailBatchCapacity'] = new BatchCapacity(0, 100)
                     // An app-wide parser answers a body over its limit before any route runs, so only a request
                     // admitted ahead of that parser reaches the capacity check.
-                    const served = setupExpressApp({ jsonBodyLimit: '1kb' })
-                    served.use('/', api.router())
-                    const server = served.listen(0, () => {})
-
-                    try {
-                        const res = await supertest(served)
-                            .post(`/api/projects/${team.id}/hog_flows/${hogFlow.id}/${TEMPLATE}`)
-                            .set({
-                                Authorization: `Bearer ${mintToken(team.id, hogFlow.id, { claims: { kind: 'template_batch' } })}`,
-                                'Content-Type': 'application/json',
-                            })
-                            .send({ variables: { body: 'x'.repeat(2048) }, recipients: [] })
-
-                        expect(res.status).toEqual(503)
-                        expect(res.body).toEqual({ error: 'over_capacity' })
-                    } finally {
-                        server.close()
-                    }
-                })
-
-                it('answers by its deadline while a shared lookup stalls, and keeps its permit until its recipients settle', async () => {
-                    api['transactionalEmailBatchCapacity'] = new BatchCapacity(1, 100)
-                    api['transactionalEmailBatchDeadlineMs'] = 100
-                    let loaded: () => void = () => {}
-                    jest.spyOn(api['hogFlowManager'], 'getHogFlowCheckingPrimaryOnMiss').mockReturnValue(
-                        new Promise((resolve) => (loaded = () => resolve(hogFlow)))
+                    const { app: full } = await servedWith(
+                        { CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_REQUESTS: 0 },
+                        { jsonBodyLimit: '1kb' }
                     )
-                    const batch = () =>
-                        sendBatch(TEMPLATE, {
-                            variables: body.variables,
-                            recipients: [recipient('ada@example.com'), recipient('bo@example.com')],
-                        })
 
-                    const stalled = await batch()
-                    const whileStalled = await batch()
-                    loaded()
+                    const res = await sendBatchTo(full, TEMPLATE, {
+                        variables: { body: 'x'.repeat(2048) },
+                        recipients: [],
+                    })
 
-                    expect(stalled.body.results).toEqual([stillRunning, stillRunning])
-                    expect(whileStalled.status).toEqual(503)
-                    await waitForExpect(() => expect(queuedRuns()).toHaveLength(2))
-                    await waitForExpect(async () => expect((await batch()).status).toEqual(200))
+                    expect(res.status).toEqual(503)
+                    expect(res.body).toEqual({ error: 'over_capacity' })
                 })
+
+                it('answers by its deadline while a recipient waits on a held claim, and keeps its permit until it settles', async () => {
+                    const { app: own } = await servedWith({
+                        CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_REQUESTS: 1,
+                        CDP_TRANSACTIONAL_EMAIL_BATCH_DEADLINE_MS: 300,
+                    })
+                    const stuck = recipient('ada@example.com')
+                    const holder = await cyclotron.connect()
+                    let stalled!: supertest.Response
+                    let whileStalled!: supertest.Response
+                    try {
+                        await holder.query('BEGIN')
+                        await holder.query(
+                            `INSERT INTO cyclotron_idempotency_keys (id, team_id, fingerprint, expires_at)
+                             VALUES ($1, $2, 'held by another request', NOW() + interval '1 hour')`,
+                            [keyedRunId(team.id, 'transactional-email', stuck.idempotency_key), team.id]
+                        )
+
+                        stalled = await sendBatchTo(own, TEMPLATE, batchOf(stuck))
+                        whileStalled = await sendBatchTo(own, TEMPLATE, batchOf(recipient('bo@example.com')))
+                    } finally {
+                        await holder.query('ROLLBACK')
+                        holder.release()
+                    }
+
+                    expect(stalled.body.results).toEqual([stillRunning])
+                    expect(whileStalled.status).toEqual(503)
+                    await waitForExpect(async () =>
+                        expect((await sendBatchTo(own, TEMPLATE, batchOf(recipient('cy@example.com')))).status).toEqual(
+                            200
+                        )
+                    )
+                })
+
+                it('frees its admission when the caller leaves before the body arrives', async () => {
+                    const { app: own, port } = await servedWith({ CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_REQUESTS: 1 })
+                    const leaving = postRaw(port, { 'Content-Length': '100000' })
+                    leaving.write('{"recipients": [')
+                    await waitForExpect(async () =>
+                        expect((await sendBatchTo(own, TEMPLATE, batchOf(recipient('bo@example.com')))).status).toEqual(
+                            503
+                        )
+                    )
+
+                    leaving.destroy()
+
+                    await waitForExpect(async () =>
+                        expect((await sendBatchTo(own, TEMPLATE, batchOf(recipient('cy@example.com')))).status).toEqual(
+                            200
+                        )
+                    )
+                })
+
+                it('sends nothing from a body that grows past the size limit while it streams', async () => {
+                    const { app: own, port } = await servedWith({})
+                    const oversized = postRaw(port)
+                    const answered = new Promise<number>((resolve) =>
+                        oversized.on('response', (response) => {
+                            response.resume()
+                            resolve(response.statusCode ?? 0)
+                        })
+                    )
+                    const chunk = 'x'.repeat(1024 * 1024)
+                    oversized.write('{"variables": {"padding": "')
+                    for (let i = 0; i < 21; i++) {
+                        oversized.write(chunk)
+                    }
+                    const sent = new Promise<void>((done) => {
+                        oversized.once('finish', done)
+                        oversized.once('close', done)
+                    })
+                    oversized.end(`"}, "recipients": ${JSON.stringify([recipient('ada@example.com')])}}`)
+
+                    expect(await answered).toEqual(413)
+                    await sent
+                    const after = await sendBatchTo(own, TEMPLATE, batchOf(recipient('bo@example.com')))
+                    expect((await storedRuns()).map(({ to }) => to)).toEqual(['bo@example.com'])
+                    expect(after.status).toEqual(200)
+                })
+
+                it.each([
+                    [TEMPLATE, 200],
+                    [CODE, 200],
+                    [`${CODE}/extra`, 401],
+                ])(
+                    'lets a scoped token reach %s on a pod that requires the internal secret only as its pattern allows',
+                    async (route, status) => {
+                        const { app: guarded } = await servedWith({}, { internalApiSecret: 'internal-secret' })
+                        const recipients = [recipient('ada@example.com')]
+
+                        const res = await sendBatchTo(
+                            guarded,
+                            route as BatchRoute,
+                            route === CODE ? { send: codeSend, recipients } : batchOf(...recipients)
+                        )
+
+                        expect(res.status).toEqual(status)
+                    }
+                )
             })
         })
 

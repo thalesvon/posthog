@@ -1,10 +1,15 @@
 import { Semaphore } from '../../utils/sempahore'
-import { BatchCapacity, BatchSlot, SlotReply, runBatchSlots } from './transactional-email-batch'
+import {
+    BatchCapacity,
+    BatchSlot,
+    SlotReply,
+    TemplateBatchRequestSchema,
+    runBatchSlots,
+} from './transactional-email-batch'
 
 describe('runBatchSlots', () => {
     const queued = (id: string): SlotReply => ({ outcome: 'queued', status: 202, body: { invocation_id: id } })
 
-    // A recipient whose send finishes only when the test says so.
     const gate = () => {
         let open: () => void = () => {}
         const opened = new Promise<void>((resolve) => (open = resolve))
@@ -139,5 +144,13 @@ describe('BatchCapacity', () => {
 
         expect(capacity.admit()).not.toBeNull()
         expect(capacity.admit()).toBeNull()
+    })
+})
+
+describe('TemplateBatchRequestSchema', () => {
+    it('refuses a recipient list over the cap with one issue, before it checks any recipient', () => {
+        const parsed = TemplateBatchRequestSchema.safeParse({ recipients: Array.from({ length: 1000 }, () => ({})) })
+
+        expect(parsed.error?.issues).toEqual([expect.objectContaining({ code: 'too_big', path: ['recipients'] })])
     })
 })

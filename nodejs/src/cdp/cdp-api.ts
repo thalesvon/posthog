@@ -81,7 +81,6 @@ import {
 } from './services/hogflows/transactional-email'
 import {
     BATCH_FAN_OUT,
-    BATCH_RESPONSE_DEADLINE_MS,
     BatchCapacity,
     BatchRecipient,
     BatchSlot,
@@ -92,6 +91,7 @@ import {
     TEMPLATE_BATCH_TOKEN_CLAIMS,
     TemplateBatchRequestSchema,
     TransactionalEmailBatchRequest,
+    readBatchBody,
     runBatchSlots,
     slotRequestOf,
     transactionalEmailBatchDurationMs,
@@ -332,7 +332,6 @@ const TRANSACTIONAL_SEND_REFUSAL_STATUS: Record<TransactionalSendRefusal, number
     ...SANDBOX_CODE_SEND_REFUSAL_STATUS,
 }
 
-// The answer a single send gives for this result, which a batch gives per recipient.
 const sendReplyOf = (result: TransactionalSendResult): SlotReply => {
     if ('invocationId' in result) {
         return {
@@ -371,6 +370,8 @@ const invalidSendReplyOf = (error: z.ZodError, context: Record<string, unknown>)
     })
     return { outcome: 'invalid_request', status: 400, body: { error: error.message } }
 }
+
+const BODY_READ_REFUSAL_STATUS = { too_large: 413, invalid_request: 400, deadline_exceeded: 503 } as const
 
 type BatchAdmission = { release: () => void; deadline: AbortSignal; arrivedAt: number }
 
@@ -431,7 +432,6 @@ export class CdpApi {
     private manageTransactionalEmailJwt: ScopedServiceJwt
     private transactionalEmailIdempotencyKeys: IdempotencyKeys
     private transactionalEmailBatchCapacity: BatchCapacity
-    private transactionalEmailBatchDeadlineMs = BATCH_RESPONSE_DEADLINE_MS
     private transactionalEmailBatchBody = express.json({ limit: '20mb' })
     private attachmentUploads: AttachmentUploads
     private emailSuppressionService: EmailSuppressionService
@@ -1661,8 +1661,7 @@ export class CdpApi {
             }
         }
 
-    // Admits a batch before its body is parsed, so a pod at its request cap refuses the request without buffering
-    // its parsed body. The response deadline counts from here.
+    // Runs before the body parser, so a pod at its request cap refuses a batch without parsing its body.
     private admitTransactionalEmailBatch =
         (tokenClaims: Record<string, string>) =>
         (req: ModifiedRequest, res: express.Response, next: express.NextFunction): void => {
@@ -1694,7 +1693,7 @@ export class CdpApi {
             }
             res.locals.transactionalEmailBatch = {
                 release,
-                deadline: deadlineAfter(this.transactionalEmailBatchDeadlineMs),
+                deadline: deadlineAfter(this.config.CDP_TRANSACTIONAL_EMAIL_BATCH_DEADLINE_MS),
                 arrivedAt,
             } satisfies BatchAdmission
             next()
@@ -1705,19 +1704,24 @@ export class CdpApi {
         res: express.Response,
         next: express.NextFunction
     ): void => {
-        this.transactionalEmailBatchBody(req, res, (error?: unknown) => {
-            if (!error) {
+        const { release, deadline } = res.locals.transactionalEmailBatch as BatchAdmission
+        void readBatchBody((done) => this.transactionalEmailBatchBody(req, res, done), {
+            connection: res.socket,
+            deadline,
+        }).then((read) => {
+            if (read === 'parsed') {
                 return next()
             }
-            ;(res.locals.transactionalEmailBatch as BatchAdmission).release()
-            const tooLarge = error instanceof Error && error.message === 'Request entity too large'
-            transactionalEmailBatchRequestsTotal.inc({ outcome: tooLarge ? 'too_large' : 'invalid_request' })
-            res.status(tooLarge ? 413 : 400).json({ error: tooLarge ? 'Request entity too large' : 'invalid_request' })
+            release()
+            transactionalEmailBatchRequestsTotal.inc({ outcome: read })
+            if (read !== 'abandoned') {
+                res.status(BODY_READ_REFUSAL_STATUS[read]).json({ error: read })
+            }
         })
     }
 
-    // One email to many recipients. Each recipient runs as its own single send, with its own claim and answer, so a
-    // retry of a partly accepted batch replays the recipients that were accepted.
+    // Each recipient runs as its own single send with its own claim, so a retry of a partly accepted batch replays the
+    // accepted recipients.
     private postTransactionalEmailBatch =
         (schema: z.ZodType<TransactionalEmailBatchRequest, unknown>) =>
         async (req: ModifiedRequest, res: express.Response): Promise<any> => {
@@ -1739,14 +1743,15 @@ export class CdpApi {
                 // Started once for every recipient, and awaited only by a recipient whose key recalls nothing, so a
                 // retry of an accepted recipient replays even after its workflow changed.
                 const lookups: BatchLookups = {
-                    team: this.deps.teamManager.getTeam(teamId).catch(() => null),
+                    team: this.deps.teamManager.getTeam(teamId),
                     hogFlow: this.hogFlowManager.getHogFlowCheckingPrimaryOnMiss(req.params.id),
                     sender: batch.send?.from
                         ? this.deps.integrationManager.getCheckingPrimaryOnMiss(batch.send.from.integrationId)
                         : Promise.resolve(null),
                 }
-                lookups.hogFlow.catch(() => undefined)
-                lookups.sender.catch(() => undefined)
+                for (const lookup of Object.values(lookups)) {
+                    lookup.catch(() => undefined)
+                }
                 const sends = this.transactionalSendsForRequest()
                 const run = await runBatchSlots(
                     batch.recipients,
@@ -1772,8 +1777,6 @@ export class CdpApi {
             }
         }
 
-    // A single send's sequence: recall first, then the workflow checks and `accept` for a recipient that recalled
-    // nothing.
     private async sendBatchRecipient(
         sends: TransactionalSends,
         teamId: number,
@@ -1791,7 +1794,10 @@ export class CdpApi {
                 return invalidSendReplyOf(parsed.error, { team_id: teamId, hog_flow_id: hogFlowId })
             }
             const request = parsed.data
-            const recalled = await sends.recall(teamId, hogFlowId, request, stages, lookups.sender)
+            const recalled = await sends.recall(teamId, hogFlowId, request, stages, lookups.sender).catch((error) => {
+                slot.mayCommit()
+                throw error
+            })
             if (recalled) {
                 return sendReplyOf(recalled)
             }

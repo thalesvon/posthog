@@ -231,6 +231,8 @@ export type CdpConfig = ClickhouseConfig & {
     // first cap is refused before its body is parsed; a recipient over the second waits for a free slot.
     CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_REQUESTS: number
     CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_SLOTS: number
+    // Below Django's 30 s forward timeout, so a stuck recipient never costs the caller the other recipients' answers.
+    CDP_TRANSACTIONAL_EMAIL_BATCH_DEADLINE_MS: number
     // Replay worker. Scaled to zero replicas; an operator scales it up to drain the topic.
     CDP_DLQ_REPLAY_TOPIC: string
 
@@ -542,6 +544,7 @@ export function getDefaultCdpConfig(): CdpConfig {
         CDP_INTAKE_KAFKA_ASYNC_TEAMS: '',
         CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_REQUESTS: 8,
         CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_SLOTS: 100,
+        CDP_TRANSACTIONAL_EMAIL_BATCH_DEADLINE_MS: 20_000,
         CDP_DLQ_REPLAY_TOPIC: KAFKA_CDP_EVENTS_DLQ,
 
         CDP_EMAIL_TRACKING_URL: 'http://localhost:8010',

@@ -41,8 +41,7 @@ export interface SetupExpressAppOptions {
 
 const READ_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
 
-// Routes that admit a request before they parse its body, so a pod at capacity refuses it without parsing it. Each one
-// parses its own body after admission. Anchored to exactly one route each, like the scoped-auth patterns.
+// Routes that parse their own body after admission. Anchored to exactly one route each, like the scoped-auth patterns.
 const ROUTE_PARSED_BODY_PATTERNS = [
     // CdpApi.postTransactionalEmailBatch
     /^\/api\/projects\/[^/]+\/hog_flows\/[^/]+\/transactional_email\/batch$/,

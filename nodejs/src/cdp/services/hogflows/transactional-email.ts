@@ -298,7 +298,7 @@ export type TransactionalEmailOutcome =
 
 export const transactionalEmailRequestsTotal = new Counter({
     name: 'cdp_transactional_email_requests_total',
-    help: 'Requests from Django to run a transactional email, by outcome and route: `single` counts a request, `batch` counts each recipient of a batch. Every outcome except `queued` and `replayed` means no email was queued for it; `deadline_running` may still go out.',
+    help: 'Answers to Django for a transactional email, by outcome and route: `single` counts a request, `batch` counts each recipient of a batch. It records the answer, not the delivery: after `intake_unavailable`, `deadline_running` or `error`, the email may still go out.',
     labelNames: ['outcome', 'route'],
 })
 
