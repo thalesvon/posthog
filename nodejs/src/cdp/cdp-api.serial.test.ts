@@ -5671,17 +5671,24 @@ describe('CDP API', () => {
                     )
                 })
 
-                it.each(['', '/'])(
-                    'refuses a request over the request cap before it parses the body, with path suffix %j',
-                    async (suffix) => {
+                it.each([
+                    [TEMPLATE, ''],
+                    [TEMPLATE, '/'],
+                    [CODE, ''],
+                    [CODE, '/'],
+                ])(
+                    'refuses a request to %s%s over the request cap before it parses the body, with only its batch token',
+                    async (route, suffix) => {
+                        // An app-wide parser answers a body over its limit before any route runs, so only a request
+                        // admitted ahead of that parser reaches the capacity check.
                         const { app: full } = await servedWith(
                             { CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_REQUESTS: 0 },
-                            { jsonBodyLimit: '1kb' }
+                            { jsonBodyLimit: '1kb', internalApiSecret: 'shared-secret' }
                         )
 
                         const res = await supertest(full)
-                            .post(pathOf(TEMPLATE) + suffix)
-                            .set({ Authorization: authorizationFor('template_batch') })
+                            .post(pathOf(route) + suffix)
+                            .set({ Authorization: authorizationFor(kindOf(route)) })
                             .send({ variables: { body: 'x'.repeat(2048) }, recipients: [] })
 
                         expect(res.status).toEqual(503)
@@ -5793,9 +5800,9 @@ describe('CDP API', () => {
                     ['a valid', () => gzipSync(JSON.stringify(batchOf(recipient('gz@example.com'))))],
                     ['an uncompressed JSON', () => JSON.stringify(batchOf(recipient('gz@example.com')))],
                 ])(
-                    'answers %s body labelled gzip with 400, sends nothing from it, and keeps serving',
+                    'answers %s body labelled gzip with 400, sends nothing from it, and frees its admission',
                     async (_, bodyOf) => {
-                        const { app: own, port } = await servedWith({})
+                        const { app: own, port } = await servedWith({ CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_REQUESTS: 1 })
                         const compressed = postRaw(port, { 'Content-Encoding': 'gzip' })
                         const answered = new Promise<number>((resolve) =>
                             compressed.on('response', (response) => {
