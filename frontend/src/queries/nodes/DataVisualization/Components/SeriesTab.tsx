@@ -621,7 +621,7 @@ export const YSeriesDisplayTab = ({ ySeriesLogicProps }: { ySeriesLogicProps: YS
                 <LemonField
                     name="wrapText"
                     label="Wrap text"
-                    info="Off by default to keep rows compact. Turn on to show all text in this column."
+                    info="Off by default to keep rows compact. Shows up to 6 lines per cell. Use View full value to read or copy the complete value."
                 >
                     {({ value, onChange }) => (
                         <LemonSwitch

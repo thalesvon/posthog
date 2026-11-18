@@ -460,7 +460,10 @@ export const Table = (props: TableProps): JSX.Element => {
 
                 const sourceColumnName = cell.sourceColumnName ?? column.name
                 const wrapText = sourceTabularColumnsByName.get(sourceColumnName)?.settings?.display?.wrapText
-                const cellClassName = wrapText ? 'whitespace-pre-wrap [overflow-wrap:anywhere]' : 'truncate'
+                // The height cap also bounds nested renderers, which can escape the text line clamp.
+                const cellClassName = wrapText
+                    ? 'line-clamp-6 max-h-[6lh] whitespace-pre-wrap [overflow-wrap:anywhere]'
+                    : 'truncate'
 
                 if (props.onInspect) {
                     const sourceRowIndex = isTransposed ? index - 1 : data.rowIndex
