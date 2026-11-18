@@ -4570,7 +4570,7 @@ export class AgentServer {
     const userPrompt =
       this.config.claudeCode?.systemPrompt ?? runStateSystemPrompt;
     const replySurface =
-      this.productSession.replySurface ?? this.productLaunch.originProduct;
+      this.productSession.replySurface ?? this.productLaunch.interactionOrigin;
 
     const sessionPrompt = buildCloudSessionSystemPrompt(
       cloudAppend,
@@ -5154,7 +5154,7 @@ export class AgentServer {
 
   private createCloudClient(payload: JwtPayload) {
     const mode = this.getEffectiveMode(payload);
-    const originProduct = this.productLaunch.originProduct;
+    const interactionOrigin = this.productLaunch.interactionOrigin;
 
     return {
       requestPermission: async (
@@ -5162,7 +5162,7 @@ export class AgentServer {
       ): Promise<RequestPermissionResponse> => {
         this.logger.debug("Permission request", {
           mode,
-          originProduct,
+          interactionOrigin,
           kind: params.toolCall?.kind,
           options: params.options,
         });

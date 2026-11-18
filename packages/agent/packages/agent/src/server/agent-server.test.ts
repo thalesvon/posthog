@@ -75,7 +75,7 @@ const INBOX_REPORT = {
 
 async function openProduct(
   server: AgentServer,
-  originProduct?: string,
+  interactionOrigin?: string,
   launchOptions: Record<string, unknown> = {},
   source?: TaskSource,
 ): Promise<void> {
@@ -86,7 +86,7 @@ async function openProduct(
   ).openProductSession({
     taskId: "test-task-id",
     runId: "test-run-id",
-    originProduct,
+    interactionOrigin,
     launchOptions,
     source,
   });
