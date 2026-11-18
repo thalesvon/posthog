@@ -588,7 +588,7 @@ export const MessagingPreferencesRemoveOptOutCreateBody = /* @__PURE__ */ zod.ob
 })
 
 /**
- * Background imports from other messaging tools, such as Customer.io and Resend suppressions and unsubscribes.
+ * Background imports from other messaging tools, such as Customer.io, Resend and Mailgun suppressions and unsubscribes.
  *
  * A run executes outside the request, so a long provider list does not time out. Poll a run to show its progress.
  * @summary Start a background import from another messaging tool
@@ -601,10 +601,12 @@ export const messagingProviderImportsCreateBodySettingsMaxOne = 64
 
 export const MessagingProviderImportsCreateBody = /* @__PURE__ */ zod.object({
     provider: zod
-        .enum(['customerio', 'resend', 'postmark'])
-        .describe('\* `customerio` - Customer.io\n\* `resend` - Resend\n\* `postmark` - Postmark')
+        .enum(['customerio', 'resend', 'postmark', 'mailgun'])
         .describe(
-            'The provider to import from.\n\n\* `customerio` - Customer.io\n\* `resend` - Resend\n\* `postmark` - Postmark'
+            '\* `customerio` - Customer.io\n\* `resend` - Resend\n\* `postmark` - Postmark\n\* `mailgun` - Mailgun'
+        )
+        .describe(
+            'The provider to import from.\n\n\* `customerio` - Customer.io\n\* `resend` - Resend\n\* `postmark` - Postmark\n\* `mailgun` - Mailgun'
         ),
     steps: zod
         .array(zod.string().max(messagingProviderImportsCreateBodyStepsItemMax))
@@ -617,13 +619,13 @@ export const MessagingProviderImportsCreateBody = /* @__PURE__ */ zod.object({
         .max(messagingProviderImportsCreateBodyApiKeyMax)
         .optional()
         .describe(
-            "The provider's API key. For Customer.io, an App API key: leave it out to reuse the stored key. For Resend, a full access key. For Postmark, a server token or the account token. PostHog deletes a Resend key or Postmark token when the run ends, so send it every time."
+            "The provider's API key. For Customer.io, an App API key: leave it out to reuse the stored key. For Resend, a full access key. For Postmark, a server token or the account token. For Mailgun, an account key that can read suppressions. PostHog deletes a Resend, Postmark or Mailgun key when the run ends, so send it every time."
         ),
     settings: zod
         .record(zod.string(), zod.string().max(messagingProviderImportsCreateBodySettingsMaxOne))
         .optional()
         .describe(
-            "Values for the provider's `settings`, by setting key, from the `providers` endpoint. A setting with a null `default` is required."
+            "Values for the provider's `settings`, by setting key, from the `providers` endpoint. A setting with a null `default` is required, such as Mailgun's `region`."
         ),
 })
 
