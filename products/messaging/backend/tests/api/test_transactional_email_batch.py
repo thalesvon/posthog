@@ -59,6 +59,25 @@ PIPELINE_ANSWERS = [
 ]
 
 
+BATCH_WIRE = {
+    "template": (
+        "/transactional_email/batch",
+        {"variables", "recipients"},
+        {"to", "distinct_id", "idempotency_key", "variables"},
+    ),
+    "code": (
+        "/transactional_email/send/batch",
+        {"variables", "send", "recipients"},
+        {"to", "distinct_id", "idempotency_key"},
+    ),
+}
+
+
+def _slot_request(forwarded: dict[str, Any], recipient: dict[str, Any]) -> dict[str, Any]:
+    slot = {**recipient, "variables": {**forwarded.get("variables", {}), **recipient.get("variables", {})}}
+    return {**slot, "send": forwarded["send"]} if "send" in forwarded else slot
+
+
 def _batch_answer(*results: dict[str, Any]) -> requests.Response:
     return _response(200, {"results": list(results)})
 
@@ -149,24 +168,23 @@ class TestTransactionalEmailBatch(APIBaseTest):
             ]
         }
         url, forwarded = mock_post.call_args.args[0], _forwarded(mock_post.call_args)
-        first, second = forwarded["recipients"]
-        if form == "template":
-            assert url.endswith(f"/hog_flows/{self.hog_flow_id}/transactional_email/batch")
-            assert {**first, "variables": {**forwarded["variables"], **first["variables"]}} == single
-        else:
-            assert url.endswith("/transactional_email/send/batch")
-            assert {**first, "send": forwarded["send"]} == single
+        route, shared_fields, recipient_fields = BATCH_WIRE[form]
+        assert url.endswith(route)
+        assert set(forwarded) <= shared_fields
+        assert all(set(recipient) <= recipient_fields for recipient in forwarded["recipients"])
+        first, second = (_slot_request(forwarded, recipient) for recipient in forwarded["recipients"])
+        assert first == single
         assert second == {
+            **single,
             "to": "user1@example.com",
             "distinct_id": "user1@example.com",
-            "variables": {},
             "idempotency_key": "key-1",
+            "variables": forwarded.get("variables", {}),
         }
         single_event, *batch_events = [call.kwargs["properties"] for call in capture.call_args_list]
         assert {"batch_size", "batch_id"}.isdisjoint(single_event)
-        assert [(event["batch_size"], event["batch_id"], event["outcome"]) for event in batch_events] == [
-            (2, forwarded["batch_id"], "queued")
-        ] * 2
+        assert [(event["batch_size"], event["outcome"]) for event in batch_events] == [(2, "queued")] * 2
+        assert batch_events[0]["batch_id"] == batch_events[1]["batch_id"]
 
     def test_each_forward_carries_a_token_for_its_own_route(self, mock_post, _flag, _capture):
         mock_post.return_value = MagicMock(status_code=202, json=lambda: {"invocation_id": "single"})

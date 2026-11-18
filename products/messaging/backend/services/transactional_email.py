@@ -671,18 +671,13 @@ def send_email_batch(
     recipients: Sequence[BatchRecipient],
     *,
     message_data: dict[str, Any],
-    batch_id: str,
 ) -> EmailBatchSent:
     with transactional_email_stage("workflow_lookup"):
         hog_flow_id = _sendable_workflow_id(team.id, template)
-    return _queue_batch(
-        team.id, hog_flow_id, {"variables": message_data}, recipients, run_transactional_workflow_batch, batch_id
-    )
+    return _queue_batch(team.id, hog_flow_id, {"variables": message_data}, recipients, run_transactional_workflow_batch)
 
 
-def send_code_email_batch(
-    team: Team, email: CodeEmail, recipients: Sequence[BatchRecipient], *, batch_id: str
-) -> EmailBatchSent:
+def send_code_email_batch(team: Team, email: CodeEmail, recipients: Sequence[BatchRecipient]) -> EmailBatchSent:
     with transactional_email_stage("workflow_lookup"):
         accepted_send, sandbox_warning = _accepted_send(team, email)
         hog_flow_id = _code_email_workflow_id(team.id, email.key, email.sensitive, require_active=False)
@@ -692,7 +687,6 @@ def send_code_email_batch(
         {"send": accepted_send},
         recipients,
         send_accepted_transactional_email_batch,
-        batch_id,
         sandbox_warning=sandbox_warning,
     )
 
@@ -931,20 +925,11 @@ def _queue_batch(
     shared: dict[str, Any],
     recipients: Sequence[BatchRecipient],
     post: _PipelinePost,
-    batch_id: str,
     *,
     sandbox_warning: SendWarning | None = None,
 ) -> EmailBatchSent:
-    payloads = [
-        _send_payload(recipient.to, recipient.distinct_id, recipient.message_data, recipient.idempotency_key)
-        for recipient in recipients
-        if recipient.refusal is None
-    ]
-    answers = iter(
-        _batch_answers(team_id, hog_flow_id, {"batch_id": batch_id, **shared, "recipients": payloads}, post)
-        if payloads
-        else ()
-    )
+    payloads = [_batch_recipient_payload(recipient) for recipient in recipients if recipient.refusal is None]
+    answers = iter(_batch_answers(team_id, hog_flow_id, {**shared, "recipients": payloads}, post) if payloads else ())
     results = tuple(
         recipient.refusal
         if recipient.refusal is not None
@@ -953,6 +938,13 @@ def _queue_batch(
     )
     sent_from_sandbox = any(isinstance(result, QueuedEmail) and result.warnings for result in results)
     return EmailBatchSent(results=results, warnings=(sandbox_warning,) if sandbox_warning and sent_from_sandbox else ())
+
+
+def _batch_recipient_payload(recipient: BatchRecipient) -> dict[str, Any]:
+    payload = _send_payload(recipient.to, recipient.distinct_id, recipient.message_data, recipient.idempotency_key)
+    if not payload["variables"]:
+        del payload["variables"]
+    return payload
 
 
 def _batch_answers(

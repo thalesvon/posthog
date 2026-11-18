@@ -90,14 +90,12 @@ class KeyScopedMessagingSendViewSet(MessagingSendViewSet):
             reserve_units(transactional_email_throttles(), request, self, len(recipients) - 1)
             if email is not None:
                 self._require_code_email_access(email.key)
-                sent = send_code_email_batch(self.team, email, recipients, batch_id=batch_id)
+                sent = send_code_email_batch(self.team, email, recipients)
                 usage_properties = code_email_usage_properties(email)
             else:
                 with transactional_email_stage("template_lookup"):
                     template = self.get_object()
-                sent = send_email_batch(
-                    self.team, template, recipients, message_data=data["message_data"], batch_id=batch_id
-                )
+                sent = send_email_batch(self.team, template, recipients, message_data=data["message_data"])
                 usage_properties = {"template_id": str(template.id)}
         except TransactionalEmailError as e:
             raise TransactionalEmailRejected(e) from None
