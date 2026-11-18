@@ -203,7 +203,6 @@ const AcceptedSendFields = z.object({
 
 export const AcceptedSendSchema = AcceptedSendFields.strict().readonly()
 
-// A batch sends one email to many recipients, so it carries no copies, attachments or send time.
 export const BatchSendSchema = AcceptedSendFields.omit({ cc: true, bcc: true, attachments: true }).strict().readonly()
 
 export type AcceptedSend = z.infer<typeof AcceptedSendSchema>

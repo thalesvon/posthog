@@ -5674,8 +5674,6 @@ describe('CDP API', () => {
                 it.each(['', '/'])(
                     'refuses a request over the request cap before it parses the body, with path suffix %j',
                     async (suffix) => {
-                        // An app-wide parser answers a body over its limit before any route runs, so only a request
-                        // admitted ahead of that parser reaches the capacity check.
                         const { app: full } = await servedWith(
                             { CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_REQUESTS: 0 },
                             { jsonBodyLimit: '1kb' }
@@ -5790,7 +5788,6 @@ describe('CDP API', () => {
                     ).toThrow('CDP_TRANSACTIONAL_EMAIL_BATCH_DEADLINE_MS')
                 })
 
-                // Django sends a batch uncompressed, so any encoded body is refused, whether it inflates or not.
                 it.each([
                     ['a malformed', () => Buffer.from('not a gzip stream')],
                     ['a valid', () => gzipSync(JSON.stringify(batchOf(recipient('gz@example.com'))))],

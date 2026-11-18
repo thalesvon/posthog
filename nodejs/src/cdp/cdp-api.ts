@@ -1707,7 +1707,6 @@ export class CdpApi {
         next: express.NextFunction
     ): void => {
         const { release, deadline } = res.locals.transactionalEmailBatch as BatchAdmission
-        // Django sends a batch uncompressed. With inflate off, a body that only claims an encoding would still parse.
         const encoding = req.headers['content-encoding']
         if (encoding !== undefined && encoding.trim().toLowerCase() !== 'identity') {
             release()
