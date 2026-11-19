@@ -1690,9 +1690,13 @@ export class CdpApi {
         const { release, deadline, arrivedAt } = res.locals.transactionalEmailBatch as BatchAdmission
         const encoding = req.headers['content-encoding']
         const length = req.headers['content-length']
-        // The declared length bounds the read, so a body must declare one. The route does not inflate a body. The server
-        // refuses a request that declares a length and a transfer encoding together.
-        if ((encoding !== undefined && encoding.trim().toLowerCase() !== 'identity') || !/^\d+$/.test(length ?? '')) {
+        // The server refuses a request that declares a length and a transfer encoding together, so a declared length
+        // frames every body the route reads.
+        if (
+            (encoding !== undefined && encoding.trim().toLowerCase() !== 'identity') ||
+            !/^\d+$/.test(length ?? '') ||
+            !req.is('application/json')
+        ) {
             release()
             transactionalEmailBatchRequestsTotal.inc({ outcome: 'invalid_request' })
             res.status(BODY_READ_REFUSAL_STATUS.invalid_request).json({ error: 'invalid_request' })

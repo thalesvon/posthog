@@ -5840,7 +5840,9 @@ describe('CDP API', () => {
                         [
                             `POST ${pathOf(TEMPLATE)} HTTP/1.1`,
                             'Host: 127.0.0.1',
-                            'Content-Type: application/json',
+                            ...(headers.some((header) => header.startsWith('Content-Type:'))
+                                ? []
+                                : ['Content-Type: application/json']),
                             ...headers,
                             '',
                             partial,
@@ -5854,6 +5856,7 @@ describe('CDP API', () => {
                     head: partialBatch,
                     rest: 'x'.repeat(length - Buffer.byteLength(partialBatch)),
                 })
+                const wholeBatch = JSON.stringify(batchOf(recipient('ada@example.com')))
                 const chunked = {
                     framing: 'Transfer-Encoding: chunked',
                     head: `${Buffer.byteLength(partialBatch).toString(16)}\r\n${partialBatch}\r\n`,
@@ -5862,6 +5865,19 @@ describe('CDP API', () => {
 
                 it.each([
                     ['a body sent in chunks', chunked, null, {}, 400, 'invalid_request', 200],
+                    [
+                        'a whole batch not labelled as JSON',
+                        {
+                            framing: `Content-Type: text/plain\r\nContent-Length: ${Buffer.byteLength(wholeBatch)}`,
+                            head: wholeBatch,
+                            rest: '',
+                        },
+                        null,
+                        {},
+                        400,
+                        'invalid_request',
+                        200,
+                    ],
                     [
                         'a body with an empty length',
                         { framing: 'Content-Length: ', head: '', rest: '' },

@@ -5,6 +5,7 @@ import { z } from 'zod'
 
 import { parseJSON } from '~/common/utils/json-parse'
 
+import { deadlineError } from '../../utils/deadline'
 import { BatchSendSchema, TransactionalEmailOutcome, TransactionalEmailRequestSchema } from './transactional-email'
 
 export const TEMPLATE_BATCH_TOKEN_CLAIMS = { kind: 'template_batch' }
@@ -156,12 +157,20 @@ export const readBatchBody = (
         const received = (chunk: Buffer): void => {
             chunks.push(chunk)
         }
+        // The abort timer can run after the last chunk even when the deadline has passed, so the read checks the clock.
         const ended = (): void => {
-            try {
-                end({ read: 'parsed', body: parseJSON(Buffer.concat(chunks).toString('utf8')) })
-            } catch {
-                end({ read: 'invalid_request' })
+            if (deadlineError(deadline) !== undefined) {
+                return end({ read: 'deadline_exceeded' })
             }
+            let parsed: unknown
+            try {
+                parsed = parseJSON(Buffer.concat(chunks).toString('utf8'))
+            } catch {
+                return end({ read: 'invalid_request' })
+            }
+            end(
+                deadlineError(deadline) !== undefined ? { read: 'deadline_exceeded' } : { read: 'parsed', body: parsed }
+            )
         }
         const abandoned = (): void => end({ read: 'abandoned' })
         const expired = (): void => end({ read: 'deadline_exceeded' })
