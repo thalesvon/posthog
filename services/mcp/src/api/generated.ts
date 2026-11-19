@@ -125692,7 +125692,7 @@ export namespace Schemas {
 
     export interface TraceJsonSide {
       kind: 'json';
-      /** The side's value as captured, for a side that is not a conversation or that could not be normalized. */
+      /** The side's value for a side that is not a conversation, with JSON text in it parsed when no number loses precision in a browser. The value as captured when the side could not be normalized. */
       value: unknown;
     }
 
@@ -125722,9 +125722,9 @@ export namespace Schemas {
       kind: 'toolCall';
       /** The name of the called tool, or an empty string when the event has none. */
       name: string;
-      /** The call's arguments, parsed from JSON text when they parse. Otherwise the text as captured. */
+      /** The call's arguments, parsed from JSON text when they parse, with JSON text inside them parsed too. Otherwise the text as captured. */
       args: unknown;
-      /** The content of the tool message that answers this call, parsed from JSON text when no number loses precision in a browser. Null when no tool message answers the call. */
+      /** The content of the tool message that answers this call, parsed from JSON text when no number loses precision in a browser, with JSON text inside it parsed the same way. Null when no tool message answers the call. */
       result: unknown;
     }
 
@@ -148481,7 +148481,7 @@ export namespace Schemas {
 
     export type SignalsMonthlyUsageParams = {
     /**
-     * UTC calendar month in YYYY-MM format, from 2026-10 onward. Defaults to the current month. Usage is grouped by finalization time.
+     * UTC calendar month in YYYY-MM format, from 2026-10 onward and entirely within the last three calendar months. Defaults to the current month. Usage is grouped by finalization time.
      * @minLength 1
      * @pattern ^[0-9]{4}-(0[1-9]|1[0-2])$
      */
