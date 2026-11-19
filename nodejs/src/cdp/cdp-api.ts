@@ -1648,6 +1648,9 @@ export class CdpApi {
         (tokenClaims: Record<string, string>) =>
         (req: ModifiedRequest, res: express.Response, next: express.NextFunction): void => {
             const arrivedAt = performance.now()
+            // The server buffers every POST body until the upload ends, whether or not a route reads it. A batch refused
+            // before its body is read must discard the rest of the upload, as Node's own HTTP server does.
+            res.once('finish', () => req.resume())
             const refuse = (outcome: string, status: number, body: Record<string, unknown>): void => {
                 transactionalEmailBatchRequestsTotal.inc({ outcome })
                 res.status(status).json(body)
@@ -1690,9 +1693,10 @@ export class CdpApi {
         const { release, deadline, arrivedAt } = res.locals.transactionalEmailBatch as BatchAdmission
         const encoding = req.headers['content-encoding']
         // The parser buffers and parses a body of unknown length past its size limit, so a body must declare its length.
+        // The server refuses a request that declares a length and a transfer encoding together.
         if (
             (encoding !== undefined && encoding.trim().toLowerCase() !== 'identity') ||
-            req.headers['content-length'] === undefined
+            !/^\d+$/.test(req.headers['content-length'] ?? '')
         ) {
             release()
             transactionalEmailBatchRequestsTotal.inc({ outcome: 'invalid_request' })

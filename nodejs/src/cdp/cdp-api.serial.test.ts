@@ -14,6 +14,7 @@ import http, { Server } from 'http'
 import jwt from 'jsonwebtoken'
 import { DateTime } from 'luxon'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
+import net from 'node:net'
 import { gzipSync } from 'node:zlib'
 import { Pool } from 'pg'
 import pino from 'pino'
@@ -5598,7 +5599,7 @@ describe('CDP API', () => {
                 const servedWith = async (
                     settings: Partial<Hub>,
                     options: Parameters<typeof setupExpressApp>[0] = {}
-                ): Promise<{ app: express.Application; port: number }> => {
+                ): Promise<{ app: express.Application; port: number; requests: express.Request[] }> => {
                     const ownQueue = new CyclotronJobQueuePostgresV2(100, hub)
                     await ownQueue.startAsProducer()
                     const cdpApi = new CdpApi(
@@ -5607,6 +5608,11 @@ describe('CDP API', () => {
                         { hogQueue: createMockJobQueue(), hogflowQueue: ownQueue }
                     )
                     const ownApp = setupExpressApp(options)
+                    const requests: express.Request[] = []
+                    ownApp.use((req, _res, next) => {
+                        requests.push(req)
+                        next()
+                    })
                     ownApp.use('/', cdpApi.router())
                     let port = 0
                     await new Promise<void>((listening) => {
@@ -5618,7 +5624,7 @@ describe('CDP API', () => {
                             }),
                         })
                     })
-                    return { app: ownApp, port }
+                    return { app: ownApp, port, requests }
                 }
                 const batchOf = (...recipients: Record<string, unknown>[]) => ({
                     variables: body.variables,
@@ -5835,34 +5841,109 @@ describe('CDP API', () => {
                     }
                 )
 
-                // The parser buffers and parses a body of unknown length past its size limit, so only a declared length
-                // bounds what it reads.
+                const startUpload = (port: number, headers: string[], partial: string) => {
+                    const socket = net.connect(port, '127.0.0.1')
+                    socket.on('error', () => {})
+                    let received = ''
+                    socket.on('data', (chunk) => (received += chunk))
+                    const answered = new Promise<{ status: number; body: string }>((resolve) =>
+                        socket.on('data', () => {
+                            const [head, body = ''] = received.split('\r\n\r\n')
+                            const length = Number(/content-length: (\d+)/i.exec(head)?.[1])
+                            if (Buffer.byteLength(body) >= length) {
+                                resolve({ status: Number(head.split(' ')[1]), body })
+                            }
+                        })
+                    )
+                    socket.write(
+                        [
+                            `POST ${pathOf(TEMPLATE)} HTTP/1.1`,
+                            'Host: 127.0.0.1',
+                            'Content-Type: application/json',
+                            ...headers,
+                            '',
+                            partial,
+                        ].join('\r\n')
+                    )
+                    return { socket, answered }
+                }
+                const partialBatch = `{"recipients": ${JSON.stringify([recipient('ada@example.com')])}, "variables": {"a": "`
+                const declaring = (length: number) => ({
+                    framing: `Content-Length: ${length}`,
+                    head: partialBatch,
+                    rest: 'x'.repeat(length - Buffer.byteLength(partialBatch)),
+                })
+                const chunked = {
+                    framing: 'Transfer-Encoding: chunked',
+                    head: `${Buffer.byteLength(partialBatch).toString(16)}\r\n${partialBatch}\r\n`,
+                    rest: '0\r\n\r\n',
+                }
+
                 it.each([
-                    ['without a length', {}, 400, 'invalid_request'],
-                    ['declared past the size limit', { 'Content-Length': String(21 * 1024 * 1024) }, 413, 'too_large'],
+                    ['a body sent in chunks', chunked, null, {}, 400, 'invalid_request', 200],
+                    [
+                        'a body with an empty length',
+                        { framing: 'Content-Length: ', head: '', rest: '' },
+                        null,
+                        {},
+                        400,
+                        'invalid_request',
+                        200,
+                    ],
+                    [
+                        'a body declared past the size limit',
+                        declaring(21 * 1024 * 1024),
+                        null,
+                        {},
+                        413,
+                        'too_large',
+                        200,
+                    ],
+                    [
+                        'a batch with a bad token',
+                        declaring(100_000),
+                        'Bearer not-a-token',
+                        {},
+                        401,
+                        'Unauthorized',
+                        200,
+                    ],
+                    [
+                        'a batch for a team not on async intake',
+                        declaring(100_000),
+                        null,
+                        { CDP_INTAKE_KAFKA_ASYNC_TEAMS: '' },
+                        409,
+                        'batch_unavailable',
+                        409,
+                    ],
                 ])(
-                    'refuses a body %s before reading it, sends nothing, and frees its admission',
-                    async (_, headers, status, error) => {
-                        const { app: own, port } = await servedWith({ CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_REQUESTS: 1 })
-                        const unread = postRaw(port, headers)
-                        const answered = new Promise<{ status: number; body: string }>((resolve) =>
-                            unread.on('response', (response) => {
-                                let body = ''
-                                response.on('data', (chunk) => (body += chunk))
-                                response.on('end', () => resolve({ status: response.statusCode ?? 0, body }))
-                            })
-                        )
-                        unread.write(
-                            `{"recipients": ${JSON.stringify([recipient('ada@example.com')])}, "variables": {"a": "`
+                    'refuses %s before reading it, discards the rest of the upload, and frees its admission',
+                    async (_, upload, authorization, settings, status, error, afterStatus) => {
+                        const {
+                            app: own,
+                            port,
+                            requests,
+                        } = await servedWith({
+                            CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_REQUESTS: 1,
+                            ...settings,
+                        })
+                        const { socket, answered } = startUpload(
+                            port,
+                            [`Authorization: ${authorization ?? authorizationFor('template_batch')}`, upload.framing],
+                            upload.head
                         )
 
                         const answer = await answered
+                        socket.write(upload.rest)
+                        await waitForExpect(() => expect(requests[0].readableEnded).toBe(true))
                         const after = await sendBatchTo(own, TEMPLATE, batchOf(recipient('bo@example.com')))
+                        socket.destroy()
 
-                        unread.destroy()
-                        expect([answer.status, parseJSON(answer.body)]).toEqual([status, { error }])
-                        expect(after.status).toEqual(200)
-                        expect(publishedTo()).toEqual(['person-bo@example.com'])
+                        expect(answer.status).toEqual(status)
+                        expect(answer.body).toContain(error)
+                        expect(after.status).toEqual(afterStatus)
+                        expect(publishedTo()).not.toContain('person-ada@example.com')
                     }
                 )
 

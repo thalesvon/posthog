@@ -231,7 +231,7 @@ export type CdpConfig = ClickhouseConfig & {
     CDP_INTAKE_KAFKA_ASYNC_TEAMS: string
     // Per pod: batch email requests in flight. A request over the cap is refused before its body is parsed.
     CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_REQUESTS: number
-    // Bounds a batch's body read and its team, workflow and sender lookups.
+    // Bounds a batch's body read, its shared checks and its claim read.
     CDP_TRANSACTIONAL_EMAIL_BATCH_DEADLINE_MS: number
     CDP_INTAKE_MSK_PRODUCER: CdpProducerName
     // Teams whose intake runs go to the CDP intake MSK cluster instead of WarpStream, in the same format.
