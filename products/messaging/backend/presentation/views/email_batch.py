@@ -5,6 +5,8 @@ from collections.abc import Iterator, Mapping
 from functools import cache
 from typing import Any
 
+from django.conf import settings
+
 from drf_spectacular.utils import OpenApiResponse
 from rest_framework import serializers, status
 from rest_framework.exceptions import APIException, ParseError, UnsupportedMediaType
@@ -361,11 +363,13 @@ def _field_refusal(attr: str) -> ExplainedRefusal:
 
 
 def batch_body_too_large() -> ExplainedRefusal:
+    ceiling = settings.DATA_UPLOAD_MAX_MEMORY_SIZE
+    limit = _size(BATCH_BODY_MAX_BYTES if ceiling is None else min(BATCH_BODY_MAX_BYTES, ceiling))
     return ExplainedRefusal(
-        f"The request body is over {BATCH_BODY_MAX_BYTES // (1024 * 1024)} MiB, so PostHog didn't send the batch.",
+        f"The request body is over {limit}, so PostHog didn't send the batch.",
         code="content_too_large",
         status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-        why=f"A batch send takes at most {BATCH_BODY_MAX_BYTES // (1024 * 1024)} MiB of request body.",
+        why=f"A batch send takes at most {limit} of request body.",
         fix="Split the recipients into smaller batches.",
     )
 
@@ -381,6 +385,12 @@ def unconfirmed_batch() -> ExplainedRefusal:
         fix="Send the batch again with the same `idempotency_key` for each recipient within 24 hours of its first "
         "request.",
     )
+
+
+def _size(size_bytes: int) -> str:
+    if size_bytes % (1024 * 1024) == 0:
+        return f"{size_bytes // (1024 * 1024)} MiB"
+    return f"{size_bytes // 1024} KiB"
 
 
 def email_batch_response(sent: EmailBatchSent) -> dict[str, Any]:

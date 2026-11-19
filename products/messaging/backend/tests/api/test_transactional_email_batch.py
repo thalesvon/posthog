@@ -406,18 +406,19 @@ class TestTransactionalEmailBatch(APIBaseTest):
 
     @parameterized.expand(
         [
-            ("over_the_batch_cap", 5 * 1024 * 1024, 20 * 1024 * 1024),
-            ("over_the_django_upload_ceiling", 2 * 1024 * 1024, 1024 * 1024),
+            ("over_the_batch_cap", 5 * 1024 * 1024, 20 * 1024 * 1024, "5 MiB"),
+            ("over_the_django_upload_ceiling", 2 * 1024 * 1024, 1024 * 1024, "1 MiB"),
         ]
     )
     def test_refuses_an_oversized_batch_and_reports_no_attachment_counts(
-        self, mock_post, _flag, capture, _name, blob_bytes, upload_ceiling
+        self, mock_post, _flag, capture, _name, blob_bytes, upload_ceiling, named_limit
     ):
         with override_settings(DATA_UPLOAD_MAX_MEMORY_SIZE=upload_ceiling):
             response = self._batch("template", message_data={"blob": "x" * blob_bytes})
 
         assert response.status_code == status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, response.json()
         assert response.json()["code"] == "content_too_large"
+        assert f"over {named_limit}," in response.json()["detail"]
         refused = capture.call_args.kwargs["properties"]
         assert (refused["outcome"], refused["attachment_count"], refused["attachment_bytes"]) == (
             "rejected",
@@ -606,6 +607,22 @@ class TestTransactionalEmailBatch(APIBaseTest):
                 {
                     "return_value": _batch_answer(
                         ACCEPTED, {"status": 202, "body": {"invocation_id": SECOND_MESSAGE_ID, "replayed": "no"}}
+                    )
+                },
+            ),
+            (
+                "an_answer_that_is_queued_and_refused",
+                {
+                    "return_value": _batch_answer(
+                        ACCEPTED,
+                        {
+                            "status": 202,
+                            "body": {
+                                "invocation_id": SECOND_MESSAGE_ID,
+                                "replayed": False,
+                                "error": "recipient_suppressed",
+                            },
+                        },
                     )
                 },
             ),
