@@ -15,7 +15,8 @@ export interface EmailPreviewPerson {
 export function renderEmailPreview(
     template: string,
     person: EmailPreviewPerson | null,
-    markUnresolved?: (source: string) => string
+    markUnresolved?: (source: string) => string,
+    plainText = false
 ): string {
     if (!template || !person) {
         return template
@@ -31,7 +32,7 @@ export function renderEmailPreview(
         now: new Date(),
     }
     try {
-        return LiquidRenderer.renderKeepingUnresolved(template, context, markUnresolved)
+        return LiquidRenderer.renderKeepingUnresolved(template, context, markUnresolved, plainText)
     } catch {
         return template
     }
@@ -44,8 +45,17 @@ const CHIP_END = '\uE001'
 const CHIP_PATTERN = /\uE000([^\uE001]*)\uE001/g
 
 /** Renders the template against the person, fencing each tag the person has no value for. */
-export function renderEmailPreviewMarked(template: string, person: EmailPreviewPerson | null): string {
-    return renderEmailPreview(template, person, (source) => `${CHIP_START}${unresolvedLabel(source)}${CHIP_END}`)
+export function renderEmailPreviewMarked(
+    template: string,
+    person: EmailPreviewPerson | null,
+    plainText = false
+): string {
+    return renderEmailPreview(
+        template,
+        person,
+        (source) => `${CHIP_START}${unresolvedLabel(source)}${CHIP_END}`,
+        plainText
+    )
 }
 
 /** "{{ person.properties.first_name }}" reads as "first name". */
@@ -113,18 +123,7 @@ export function personPropertiesUsed(templates: string[]): string[] {
     return Array.from(new Set(keys))
 }
 
-// The renderer escapes values for html, and the worker renders text fields without that, so undo it here.
-const ESCAPED_CHARACTERS: Record<string, string> = {
-    '&amp;': '&',
-    '&lt;': '<',
-    '&gt;': '>',
-    '&#34;': '"',
-    '&#39;': "'",
-}
-
 /** Renders as plain text, with each missing value read out as its label, for one-line summaries. */
 export function renderEmailPreviewText(template: string, person: EmailPreviewPerson | null): string {
-    return splitUnresolved(renderEmailPreviewMarked(template, person))
-        .join('')
-        .replace(/&(?:amp|lt|gt|#34|#39);/g, (entity) => ESCAPED_CHARACTERS[entity])
+    return splitUnresolved(renderEmailPreviewMarked(template, person, true)).join('')
 }
