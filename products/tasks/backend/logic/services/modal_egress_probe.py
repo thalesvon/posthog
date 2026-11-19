@@ -19,6 +19,7 @@ from products.tasks.backend.logic.services.sandbox import (
     SandboxTemplate,
     get_sandbox_class_for_run_backend,
 )
+from products.tasks.backend.logic.services.sandbox_config import agent_egress_staging_probe_enabled
 
 if TYPE_CHECKING:
     from modal.sandbox import SidecarContainer
@@ -118,7 +119,10 @@ class ModalEgressProbe:
 
     @staticmethod
     def _sandbox_class() -> type[ModalSandbox]:
-        if not (settings.DEBUG or settings.TEST) or str(settings.SANDBOX_PROVIDER).upper() != "MODAL_DOCKER":
+        if (
+            not ((settings.DEBUG or settings.TEST) and str(settings.SANDBOX_PROVIDER).upper() == "MODAL_DOCKER")
+            and not agent_egress_staging_probe_enabled()
+        ):
             raise RuntimeError("Egress probes require the local MODAL_DOCKER provider")
         sandbox_class = get_sandbox_class_for_run_backend("modal")
         if not issubclass(sandbox_class, ModalSandbox):

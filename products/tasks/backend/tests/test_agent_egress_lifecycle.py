@@ -215,7 +215,18 @@ class TestAgentEgressLifecycle(TestCase):
             execution_id=execution_id or self.execution_id
         )
 
-    def test_new_worker_renews_and_refreshes_the_existing_execution(self) -> None:
+    @parameterized.expand([("development",), ("staging",)])
+    def test_new_worker_renews_and_refreshes_the_existing_execution(self, environment: str) -> None:
+        if environment == "staging":
+            self.enterContext(
+                override_settings(
+                    DEBUG=False,
+                    TEST=False,
+                    CLOUD_DEPLOYMENT="DEV",
+                    SANDBOX_PROVIDER="modal",
+                    AGENT_EGRESS_STAGING_PROBE_RUN_ID=str(self.task_run.id),
+                )
+            )
         TaskRun.update_state_atomic(self.task_run.id, updates={"unrelated": "preserved"})
         sandbox_id = self.controller().prepare()
         for _ in range(18):
@@ -241,6 +252,9 @@ class TestAgentEgressLifecycle(TestCase):
         self.assertEqual(self.task_run.state["unrelated"], "preserved")
         self.assertEqual(self.task_run.state[STATE_KEY]["sandbox_id"], sandbox_id)
         self.assertEqual(self.controller().probe(), {204: self.config.requests_per_round})
+        self.controller().close(reason="completed", sandbox_id=sandbox_id)
+        self.assertTrue(self.registration().revoked)
+        self.assertTrue(self.probes[sandbox_id].destroyed)
 
     def test_rejected_probe_raises_a_non_retryable_error(self) -> None:
         sandbox_id = self.controller().prepare()

@@ -52,8 +52,7 @@ class AgentEgressLifecycle:
         workflow_run_id: str,
         provisioning_deadline: float | None = None,
     ) -> None:
-        if not settings.DEBUG or settings.SANDBOX_PROVIDER != "MODAL_DOCKER":
-            raise ValueError("Egress probes require DEBUG and SANDBOX_PROVIDER=MODAL_DOCKER")
+        config.validate_controller()
         self.config = config
         self.execution_id = execution_id
         self.workflow_run_id = workflow_run_id

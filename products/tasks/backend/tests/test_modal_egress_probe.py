@@ -65,7 +65,18 @@ class TestModalEgressProbe(SimpleTestCase):
             name="test-egress", relay_image_id="im-example", endpoint=endpoint, dev_proxy_ipv4=dev_proxy_ipv4
         )
 
-    def test_launch_uses_isolated_probe_profile_and_exact_sidecar_destination(self) -> None:
+    @parameterized.expand([("development",), ("staging",)])
+    def test_launch_uses_isolated_probe_profile_and_exact_sidecar_destination(self, environment: str) -> None:
+        if environment == "staging":
+            self.enterContext(
+                override_settings(
+                    DEBUG=False,
+                    TEST=False,
+                    CLOUD_DEPLOYMENT="DEV",
+                    SANDBOX_PROVIDER="modal",
+                    AGENT_EGRESS_STAGING_PROBE_RUN_ID="00000000-0000-4000-8000-000000000001",
+                )
+            )
         probe = self.launch()
 
         config = self.create.call_args.args[0]
