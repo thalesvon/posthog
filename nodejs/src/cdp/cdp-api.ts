@@ -1689,7 +1689,11 @@ export class CdpApi {
     ): void => {
         const { release, deadline, arrivedAt } = res.locals.transactionalEmailBatch as BatchAdmission
         const encoding = req.headers['content-encoding']
-        if (encoding !== undefined && encoding.trim().toLowerCase() !== 'identity') {
+        // The parser buffers and parses a body of unknown length past its size limit, so a body must declare its length.
+        if (
+            (encoding !== undefined && encoding.trim().toLowerCase() !== 'identity') ||
+            req.headers['content-length'] === undefined
+        ) {
             release()
             transactionalEmailBatchRequestsTotal.inc({ outcome: 'invalid_request' })
             res.status(BODY_READ_REFUSAL_STATUS.invalid_request).json({ error: 'invalid_request' })

@@ -5835,32 +5835,36 @@ describe('CDP API', () => {
                     }
                 )
 
-                it('sends nothing from a body that grows past the size limit while it streams', async () => {
-                    const { app: own, port } = await servedWith({})
-                    const oversized = postRaw(port)
-                    const answered = new Promise<number>((resolve) =>
-                        oversized.on('response', (response) => {
-                            response.resume()
-                            resolve(response.statusCode ?? 0)
-                        })
-                    )
-                    const chunk = 'x'.repeat(1024 * 1024)
-                    oversized.write('{"variables": {"padding": "')
-                    for (let i = 0; i < 21; i++) {
-                        oversized.write(chunk)
-                    }
-                    const sent = new Promise<void>((done) => {
-                        oversized.once('finish', done)
-                        oversized.once('close', done)
-                    })
-                    oversized.end(`"}, "recipients": ${JSON.stringify([recipient('ada@example.com')])}}`)
+                // The parser buffers and parses a body of unknown length past its size limit, so only a declared length
+                // bounds what it reads.
+                it.each([
+                    ['without a length', {}, 400, 'invalid_request'],
+                    ['declared past the size limit', { 'Content-Length': String(21 * 1024 * 1024) }, 413, 'too_large'],
+                ])(
+                    'refuses a body %s before reading it, sends nothing, and frees its admission',
+                    async (_, headers, status, error) => {
+                        const { app: own, port } = await servedWith({ CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_REQUESTS: 1 })
+                        const unread = postRaw(port, headers)
+                        const answered = new Promise<{ status: number; body: string }>((resolve) =>
+                            unread.on('response', (response) => {
+                                let body = ''
+                                response.on('data', (chunk) => (body += chunk))
+                                response.on('end', () => resolve({ status: response.statusCode ?? 0, body }))
+                            })
+                        )
+                        unread.write(
+                            `{"recipients": ${JSON.stringify([recipient('ada@example.com')])}, "variables": {"a": "`
+                        )
 
-                    expect(await answered).toEqual(413)
-                    await sent
-                    const after = await sendBatchTo(own, TEMPLATE, batchOf(recipient('bo@example.com')))
-                    expect(publishedTo()).toEqual(['person-bo@example.com'])
-                    expect(after.status).toEqual(200)
-                })
+                        const answer = await answered
+                        const after = await sendBatchTo(own, TEMPLATE, batchOf(recipient('bo@example.com')))
+
+                        unread.destroy()
+                        expect([answer.status, parseJSON(answer.body)]).toEqual([status, { error }])
+                        expect(after.status).toEqual(200)
+                        expect(publishedTo()).toEqual(['person-bo@example.com'])
+                    }
+                )
 
                 it.each([
                     [TEMPLATE, 200],
