@@ -41,6 +41,7 @@ from products.tasks.backend.constants import (
     INITIAL_PERMISSION_MODE_CHOICES,
     RESUME_SNAPSHOT_KIND,
     InitialPermissionMode,
+    filter_user_sandbox_env_vars,
     is_same_run_resume_idle_state,
     is_same_run_resume_state,
 )
