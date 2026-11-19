@@ -11,7 +11,6 @@ import { closeHub, createHub } from '~/common/utils/db/hub'
 import { createCdpConsumerDeps } from '../../tests/helpers/cdp'
 import { Hub } from '../types'
 import { CdpApi } from './cdp-api'
-import { createIdempotencyValkeyPool } from './services/hogflows/idempotency-keys'
 
 describe('a transactional email batch on a pod that requires the internal secret, with no request to spare', () => {
     const TEMPLATE = 'transactional_email/batch'
@@ -27,11 +26,10 @@ describe('a transactional email batch on a pod that requires the internal secret
             CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_REQUESTS: 0,
             CDP_INTAKE_KAFKA_ASYNC_TEAMS: '1',
         })
-        api = new CdpApi(
-            hub,
-            { ...createCdpConsumerDeps(hub), idempotencyValkey: createIdempotencyValkeyPool(hub) },
-            { hogQueue: createMockJobQueue(), hogflowQueue: createMockJobQueue() }
-        )
+        api = new CdpApi(hub, createCdpConsumerDeps(hub), {
+            hogQueue: createMockJobQueue(),
+            hogflowQueue: createMockJobQueue(),
+        })
         app = setupExpressApp({ jsonBodyLimit: '1kb', internalApiSecret: 'shared-secret' })
         app.use('/', api.router())
         server = app.listen(0, () => {})

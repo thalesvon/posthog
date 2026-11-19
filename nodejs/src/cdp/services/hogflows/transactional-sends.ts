@@ -1,4 +1,3 @@
-import { randomUUID } from 'crypto'
 import { DateTime } from 'luxon'
 import { Counter } from 'prom-client'
 
@@ -45,13 +44,7 @@ import { createHogFlowInvocation } from './hogflow-executor.service'
 import type { HogFlowManagerService } from './hogflow-manager.service'
 import { checkHogFlowQuotaLimits } from './hogflow-quota-limiting'
 import { TRANSACTIONAL_EMAIL_EVENT } from './hogflow-sensitivity'
-import {
-    FingerprintWithPreviousShape,
-    IdempotencyKeys,
-    QueuedReply,
-    SenderKind,
-    storedFingerprint,
-} from './idempotency-keys'
+import { QueuedReply, SenderKind, requestFingerprint } from './idempotency-keys'
 import {
     AcceptedSend,
     TransactionalEmailRequest,
@@ -64,8 +57,6 @@ import { withinDeadline } from './transactional-email-batch'
 const ACCEPTED_SEND_FINGERPRINT_MARKER = 'accepted_send'
 const SCHEDULED_AT_FINGERPRINT_MARKER = 'scheduled_at'
 const MAX_SCHEDULE_AHEAD_MS = 30 * 24 * 60 * 60 * 1000
-// Pods' clocks disagree, so a run's row can read as created a little after this pod saw it exist.
-const CLOCK_SKEW_MARGIN_MS = 60 * 60 * 1000
 const NO_ATTACHMENTS = { attachment_count: 0, attachment_bytes: 0 }
 const PRIORITY_CLASS: EmailQueuePriorityClass = 'fast'
 const RUN_SCOPE = 'transactional-email'
@@ -85,7 +76,6 @@ const createdAtOf = (messageId: string, event?: { timestamp?: unknown } | null):
 const latestDueAtOf = (messageId: string, event?: { timestamp?: unknown } | null): Date =>
     new Date(createdAtOf(messageId, event).getTime() + MAX_SCHEDULE_AHEAD_MS)
 
-// A claim keeps the current shape only: a request that matches the previous shape also matches the current one.
 const claimFor = (
     teamId: number,
     idempotencyKey: string | undefined,
@@ -95,13 +85,7 @@ const claimFor = (
         ? { runId: keyedRunId(teamId, RUN_SCOPE, idempotencyKey), fingerprint: fingerprint.current }
         : undefined
 
-// Recorded as both shapes, so a pod that matches either one replays the claim's request.
-const claimedShape = (fingerprint: string): FingerprintWithPreviousShape => ({
-    current: fingerprint,
-    previousShape: fingerprint,
-})
-
-type TransactionalEmailFingerprint = Required<FingerprintWithPreviousShape>
+type TransactionalEmailFingerprint = { current: string; alsoMatches: string[] }
 
 const claimedBySameRequest = (fingerprint: TransactionalEmailFingerprint, claimed: string | undefined): boolean =>
     claimed !== undefined && fingerprint.alsoMatches.includes(claimed)
@@ -110,7 +94,7 @@ const claimedBySameRequest = (fingerprint: TransactionalEmailFingerprint, claime
 // unkeyed hash. A record signed under any configured key still matches after a rotation. So does the unkeyed hash of a
 // record stored before keying, until the last such record expires.
 const fingerprintsOf = (encryptedFields: EncryptedFields, request: unknown[]): string[] => {
-    const unkeyed = IdempotencyKeys.fingerprint(request)
+    const unkeyed = requestFingerprint(request)
     return [...encryptedFields.signatures(FINGERPRINT_PURPOSE, unkeyed), unkeyed]
 }
 
@@ -123,17 +107,16 @@ const transactionalEmailFingerprint = (
 ): TransactionalEmailFingerprint => {
     const request: unknown[] = [hogFlowId, to, distinct_id, variables]
     const schedule: unknown[] = scheduledAt ? [SCHEDULED_AT_FINGERPRINT_MARKER, scheduledAt.toISOString()] : []
-    const withSender = ({ from, ...rest }: AcceptedSend, sender: CallerChosenSender | undefined): unknown[] => [
-        ...request,
-        ACCEPTED_SEND_FINGERPRINT_MARKER,
-        { ...rest, from: sender },
-        ...schedule,
-    ]
-    const shapes = send
-        ? [withSender(send, senderTheCallerChose(send.from)), withSender(send, senderBeforeSandboxSends(send.from))]
-        : [[...request, ...schedule]]
-    const [current, previousShape = current] = shapes.map((shape) => fingerprintsOf(encryptedFields, shape))
-    return { current: current[0], previousShape: previousShape[0], alsoMatches: [...current, ...previousShape] }
+    const shape: unknown[] = send
+        ? [
+              ...request,
+              ACCEPTED_SEND_FINGERPRINT_MARKER,
+              { ...send, from: senderTheCallerChose(send.from) },
+              ...schedule,
+          ]
+        : [...request, ...schedule]
+    const fingerprints = fingerprintsOf(encryptedFields, shape)
+    return { current: fingerprints[0], alsoMatches: fingerprints }
 }
 
 const warnTelemetryFlushFailed = (error: unknown, invocationId: string): void => {
@@ -147,13 +130,6 @@ type CallerChosenSender = Partial<NonNullable<AcceptedSend['from']>>
 
 const senderTheCallerChose = (from: AcceptedSend['from']): CallerChosenSender | undefined =>
     from?.email || from?.name ? { email: from.email, name: from.name } : undefined
-
-const senderBeforeSandboxSends = (from: AcceptedSend['from']): CallerChosenSender | undefined => {
-    if (!from) {
-        return undefined
-    }
-    return from.email ? { email: from.email, name: from.name } : { integrationId: from.integrationId, name: from.name }
-}
 
 const writeStatus = (
     emailStatus: EmailStatusService,
@@ -212,7 +188,6 @@ const recipientOf = (job: CyclotronJobInvocation): string | undefined => {
 export type TransactionalSendsDeps = {
     siteUrl: string
     encryptedFields: EncryptedFields
-    idempotencyKeys: IdempotencyKeys
     runIntake: RunIntake
     invocationResultsRows: HogInvocationResultsService
     emailStatus: EmailStatusService
@@ -235,21 +210,6 @@ type BatchChecks = { refusal: TransactionalSendRefusal | null; recipientRefusals
 // The id a keyed send's run gets, which a refusal names too, so the caller can read the send's status by it.
 export const transactionalEmailRunId = (teamId: number, idempotencyKey: string): string =>
     keyedRunId(teamId, RUN_SCOPE, idempotencyKey)
-
-const stampKeyedRun = (
-    invocation: CyclotronJobInvocationHogFlow,
-    idempotencyKey: string,
-    fingerprint: TransactionalEmailFingerprint,
-    reply: QueuedReply
-): void => {
-    invocation.state.idempotencyKey = {
-        hash: IdempotencyKeys.hash(idempotencyKey),
-        ...storedFingerprint(fingerprint),
-        ...(reply.senderKind ? { senderKind: reply.senderKind } : {}),
-        replayFields: reply.replayFields,
-        ...(reply.scheduledAt && { scheduledAt: reply.scheduledAt }),
-    }
-}
 
 export type SendFiles = {
     shape: FilesWorkflowShape | null
@@ -298,7 +258,6 @@ export class TransactionalSends {
             return null
         }
         stages.start('idempotency')
-        // Async mode reads only the Postgres claim, so it never depends on Valkey.
         const isAsync = this.deps.runIntake.modeOf(teamId) === 'async'
         let recalled: Recalled
         try {
@@ -314,34 +273,16 @@ export class TransactionalSends {
         if (recalled.status === 'absent') {
             return null
         }
-        const kept = isAsync ? null : await this.deps.idempotencyKeys.queuedReplay(teamId, idempotencyKey)
-        const stored = kept ?? (recalled.reply as QueuedReply | null) ?? undefined
-        const replayed = claimedBySameRequest(fingerprint, recalled.claimedFingerprint)
+        if (!claimedBySameRequest(fingerprint, recalled.claimedFingerprint)) {
+            return { outcome: 'idempotency_key_reused' }
+        }
+        const stored = (recalled.reply as QueuedReply | null) ?? undefined
         // A claim made before it kept its reply falls back to what the matching request asked for.
         const scheduledAt =
             stored?.scheduledAt ??
-            (replayed && requestedAt && requestedAt.getTime() > Date.now() ? requestedAt.toISOString() : null)
-        const sender = replayed && !stored && send ? senderOfCodeSend(teamId, send, await senderLookup) : undefined
+            (requestedAt && requestedAt.getTime() > Date.now() ? requestedAt.toISOString() : null)
+        const sender = !stored && send ? senderOfCodeSend(teamId, send, await senderLookup) : undefined
         const senderKind = stored ? stored.senderKind : sender?.kind === 'email_sandbox' ? sender.kind : undefined
-        if (!kept && !isAsync) {
-            // Restores a record Valkey lost, because an older pod reads only Valkey and would queue a second run.
-            await this.deps.idempotencyKeys.markQueued(
-                teamId,
-                idempotencyKey,
-                claimedShape(recalled.claimedFingerprint),
-                recalled.runId,
-                randomUUID(),
-                stored?.replayFields,
-                scheduledAt ?? undefined,
-                !replayed || scheduledAt
-                    ? new Date(Date.now() + MAX_SCHEDULE_AHEAD_MS + CLOCK_SKEW_MARGIN_MS)
-                    : undefined,
-                senderKind
-            )
-        }
-        if (!replayed) {
-            return { outcome: 'idempotency_key_reused' }
-        }
         return {
             outcome: 'replayed',
             invocationId: recalled.runId,
@@ -361,7 +302,6 @@ export class TransactionalSends {
         settlement?: PublishSettlement
     ): Promise<TransactionalSendResult> {
         const senderKind = sender.kind === 'email_sandbox' ? sender.kind : undefined
-        const { idempotencyKeys } = this.deps
         const { to, idempotency_key: idempotencyKey, send } = request
         const requestedAt = request.scheduled_at ? new Date(request.scheduled_at) : null
 
@@ -383,37 +323,7 @@ export class TransactionalSends {
             : { kind: 'transactional-email', invocation }
         // Async mode answers on the broker's ack and leaves the claim, the insert and the rows to the intake consumer.
         const isAsync = this.deps.runIntake.modeOf(team.id) === 'async'
-        // Async mode takes no Valkey lease: the consumer's Postgres claim deduplicates the run.
-        const leasesKey = idempotencyKey && !isAsync
-        const leaseToken = randomUUID()
-        const releaseKey = async (): Promise<void> => {
-            if (leasesKey) {
-                stages.start('idempotency')
-                await idempotencyKeys.release(team.id, idempotencyKey, leaseToken)
-            }
-        }
-        if (leasesKey) {
-            stages.start('idempotency')
-            const reservation = await idempotencyKeys.reserve(team.id, idempotencyKey, fingerprint, leaseToken)
-            switch (reservation.status) {
-                case 'replayed':
-                    return {
-                        outcome: 'replayed',
-                        invocationId: reservation.invocationId,
-                        scheduledAt: reservation.scheduledAt ?? null,
-                        replyFields: { ...NO_ATTACHMENTS, ...reservation.replayFields },
-                        senderKind: reservation.senderKind,
-                    }
-                case 'in_flight':
-                    return { outcome: 'idempotency_key_in_flight' }
-                case 'conflict':
-                    return { outcome: 'idempotency_key_reused' }
-                case 'unavailable':
-                    return { outcome: 'idempotency_unavailable' }
-            }
-        }
         if (sender.kind === 'refused') {
-            await releaseKey()
             return { outcome: sender.refusal }
         }
         const latestDueAt = latestDueAtOf(invocation.id, invocation.state.event)
@@ -426,7 +336,6 @@ export class TransactionalSends {
         const statusAt = new Date()
         const { shape } = files
         if (shape && 'refused' in shape) {
-            await releaseKey()
             return { refused: { status: 400, body: shape.refused } }
         }
         let attachmentTotals = NO_ATTACHMENTS
@@ -440,7 +349,6 @@ export class TransactionalSends {
                   ? await this.refusalWithinBudget(team.id, hogFlow, recipients, senderKind)
                   : await this.refusal(team.id, hogFlow, recipients, senderKind)
             if (refusal) {
-                await releaseKey()
                 if (isSkippedSendRefusal(refusal)) {
                     this.deps.emailStatus.queueRefusedSend({
                         teamId: team.id,
@@ -469,7 +377,6 @@ export class TransactionalSends {
                     latestDueAt
                 )
                 if ('refused' in accepted) {
-                    await releaseKey()
                     return { refused: accepted.refused }
                 }
                 invocation.state.send = { ...invocation.state.send!, attachments: accepted.accepted.files }
@@ -479,16 +386,12 @@ export class TransactionalSends {
                 }
             }
             invocation.state.statusAt = statusAt.toISOString()
-            const reply: QueuedReply = {
-                replayFields: attachmentTotals,
-                scheduledAt: scheduledAt?.toISOString(),
-                senderKind,
-            }
-            if (idempotencyKey) {
-                stampKeyedRun(invocation, idempotencyKey, fingerprint, reply)
-            }
             if (run.claim) {
-                run.claim.reply = reply
+                run.claim.reply = {
+                    replayFields: attachmentTotals,
+                    scheduledAt: scheduledAt?.toISOString(),
+                    senderKind,
+                } satisfies QueuedReply
             }
             if (isAsync) {
                 stages.start('intake_produce')
@@ -498,43 +401,15 @@ export class TransactionalSends {
             stages.start('queue_insert')
             committed = (await this.deps.runIntake.launch([run], { wait: 'committed', settlement }))[0]
         } catch (error) {
-            await releaseKey()
             if (isLockTimeout(error)) {
                 return { outcome: 'idempotency_unavailable' }
             }
             throw error
         }
-        // The run's row exists by now, and a reschedule can move it up to its created time plus the limit, so its record
-        // in Valkey lasts at least that long.
-        const latestRescheduleAt = new Date(Date.now() + MAX_SCHEDULE_AHEAD_MS + CLOCK_SKEW_MARGIN_MS)
-        if (committed.outcome !== 'created' && idempotencyKey) {
-            // Recorded in Valkey too, because an older pod reads only Valkey and would queue a second run. A mismatch
-            // records the other send under this lease, with its fingerprint from the claim's own transaction, so an
-            // older pod replays its retries and refuses this content.
-            stages.start('idempotency')
-            const replayed =
-                committed.outcome === 'replayed' || claimedBySameRequest(fingerprint, committed.claimedFingerprint)
-            const recordedFingerprint = replayed
-                ? fingerprint
-                : committed.claimedFingerprint && claimedShape(committed.claimedFingerprint)
-            if (recordedFingerprint === undefined) {
-                await releaseKey()
-            } else {
-                await idempotencyKeys.markQueued(
-                    team.id,
-                    idempotencyKey,
-                    recordedFingerprint,
-                    committed.runId,
-                    leaseToken,
-                    replayed ? attachmentTotals : undefined,
-                    replayed ? scheduledAt?.toISOString() : undefined,
-                    !replayed || scheduledAt ? latestRescheduleAt : undefined,
-                    replayed ? senderKind : undefined
-                )
-            }
-            if (!replayed) {
-                return { outcome: 'idempotency_key_reused' }
-            }
+        if (committed.outcome === 'mismatch' && !claimedBySameRequest(fingerprint, committed.claimedFingerprint)) {
+            return { outcome: 'idempotency_key_reused' }
+        }
+        if (committed.outcome !== 'created') {
             return {
                 outcome: 'replayed',
                 invocationId: committed.runId,
@@ -544,20 +419,6 @@ export class TransactionalSends {
             }
         }
         cdpEmailQueuedTotal.labels(PRIORITY_CLASS).inc()
-        if (idempotencyKey) {
-            stages.start('idempotency')
-            await idempotencyKeys.markQueued(
-                team.id,
-                idempotencyKey,
-                fingerprint,
-                invocation.id,
-                leaseToken,
-                attachmentTotals,
-                scheduledAt?.toISOString(),
-                scheduledAt ? latestRescheduleAt : undefined,
-                senderKind
-            )
-        }
         stages.start('metrics_flush')
         writeStatus(this.deps.emailStatus, {
             teamId: team.id,
@@ -671,7 +532,6 @@ export class TransactionalSends {
                 }
                 invocation.state.statusAt = statusAt
                 const reply: QueuedReply = { replayFields: NO_ATTACHMENTS, senderKind }
-                stampKeyedRun(invocation, request.idempotency_key, fingerprint, reply)
                 const produced = await this.deps.runIntake.produce(
                     { kind: 'transactional-email', invocation, claim: { fingerprint: fingerprint.current, reply } },
                     settlement
@@ -878,7 +738,6 @@ export class TransactionalSends {
 
 export type ScheduledTransactionalSendsDeps = {
     jobs: Pick<CyclotronV2JobProducer, 'cancelUnclaimed' | 'rescheduleUnclaimed'>
-    idempotencyKeys: Pick<IdempotencyKeys, 'replayUntilDayAfter'>
     hogFlows: Pick<HogFlowManagerService, 'getHogFlowCheckingPrimaryOnMiss'>
     invocationResults: Pick<InvocationResultsService, 'monitoringService' | 'invocationResultsRowsService'>
     emailStatus: EmailStatusService
@@ -889,7 +748,7 @@ export type ScheduledSendCancelResult = { outcome: 'canceled' } | { outcome: 'cl
 
 export type ScheduledSendRescheduleResult =
     | { outcome: 'rescheduled'; scheduledAt: string }
-    | { outcome: 'invalid_scheduled_at' | 'canceled' | 'claimed' | 'not_found' | 'idempotency_unavailable' }
+    | { outcome: 'invalid_scheduled_at' | 'canceled' | 'claimed' | 'not_found' }
 
 export class ScheduledTransactionalSends {
     constructor(private readonly deps: ScheduledTransactionalSendsDeps) {}
@@ -941,15 +800,6 @@ export class ScheduledTransactionalSends {
             return { outcome: result.outcome }
         }
         const job = v2JobToInvocation(result.job, this.deps.stateOpener)
-        const idempotencyKey = (job.state as CyclotronJobInvocationHogFlow['state'] | null)?.idempotencyKey
-        const keyKept =
-            !idempotencyKey ||
-            (await this.deps.idempotencyKeys.replayUntilDayAfter(
-                teamId,
-                job.id,
-                idempotencyKey,
-                latestDueAtOf(job.id, jobTriggerEvent(job))
-            ))
         writeStatus(this.deps.emailStatus, {
             teamId,
             messageId,
@@ -960,9 +810,6 @@ export class ScheduledTransactionalSends {
             statusAt: result.rescheduledAt,
             messageCreatedAt: messageCreatedAtOf(jobTriggerEvent(job)),
         })
-        if (!keyKept) {
-            return { outcome: 'idempotency_unavailable' }
-        }
         return { outcome: 'rescheduled', scheduledAt: scheduledAt.toISOString() }
     }
 
