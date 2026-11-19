@@ -63,17 +63,33 @@ describe('transactional email batch', () => {
     describe('withinDeadline', () => {
         afterEach(() => jest.restoreAllMocks())
 
-        it('answers deadline_exceeded for work that finishes after its deadline passed', async () => {
+        // The clock passes the deadline while its abort timer has not run yet, which an event-loop stall causes in a pod.
+        it.each([
+            { what: 'finishes', settle: (work: { resolve: () => void; reject: () => void }) => work.resolve() },
+            { what: 'fails', settle: (work: { resolve: () => void; reject: () => void }) => work.reject() },
+        ])('answers deadline_exceeded for work that $what after its deadline passed', async ({ settle }) => {
             const deadline = deadlineAfter(60_000)
             let now = performance.now()
             jest.spyOn(performance, 'now').mockImplementation(() => now)
-            let finish: (found: string) => void = () => {}
-            const work = withinDeadline(new Promise<string>((resolve) => (finish = resolve)), deadline)
+            const work = { resolve: () => {}, reject: () => {} }
+            const answer = withinDeadline(
+                new Promise<string>((resolve, reject) => {
+                    work.resolve = () => resolve('found')
+                    work.reject = () => reject(new Error('connection terminated'))
+                }),
+                deadline
+            )
 
             now += 60_000
-            finish('found')
+            settle(work)
 
-            expect(await work).toEqual('deadline_exceeded')
+            await expect(answer).resolves.toEqual('deadline_exceeded')
+        })
+
+        it('rethrows a failure that arrives within its deadline', async () => {
+            const answer = withinDeadline(Promise.reject(new Error('connection terminated')), deadlineAfter(60_000))
+
+            await expect(answer).rejects.toThrow('connection terminated')
         })
     })
 

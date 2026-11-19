@@ -178,8 +178,8 @@ export const readBatchBody = (
         body.on('end', ended)
     })
 
-// The work keeps running past the deadline, so its later failure must not go unhandled. A stalled event loop can run
-// finished work before the deadline's abort timer, so the answer also reads the clock.
+// The work keeps running past the deadline, so its later failure must not go unhandled. A stalled event loop can settle
+// the work before the deadline's abort timer runs, so the answer also reads the clock, whether the work finished or failed.
 export const withinDeadline = <T>(work: Promise<T>, deadline: AbortSignal): Promise<T | 'deadline_exceeded'> => {
     work.catch(() => undefined)
     if (deadline.aborted) {
@@ -190,7 +190,16 @@ export const withinDeadline = <T>(work: Promise<T>, deadline: AbortSignal): Prom
         expired = () => resolve('deadline_exceeded')
         deadline.addEventListener('abort', expired, { once: true })
     })
+    const passed = (): boolean => deadlineError(deadline) !== undefined
     return Promise.race([work, aborted])
-        .then((result) => (deadlineError(deadline) !== undefined ? 'deadline_exceeded' : result))
+        .then(
+            (result) => (passed() ? 'deadline_exceeded' : result),
+            (error: unknown) => {
+                if (passed()) {
+                    return 'deadline_exceeded' as const
+                }
+                throw error
+            }
+        )
         .finally(() => deadline.removeEventListener('abort', expired))
 }

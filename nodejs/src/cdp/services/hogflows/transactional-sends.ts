@@ -15,6 +15,7 @@ import {
     HogFunctionInvocationGlobals,
     IntegrationType,
 } from '../../types'
+import { deadlineError } from '../../utils/deadline'
 import { EncryptedFields } from '../../utils/encryption-utils'
 import { convertToHogFunctionFilterGlobal } from '../../utils/hog-function-filtering'
 import { createCanceledInvocationResult } from '../../utils/invocation-utils'
@@ -502,7 +503,9 @@ export class TransactionalSends {
             ),
             deadline
         )
-        if (recalled === 'deadline_exceeded') {
+        // Other work can run between the clock read in withinDeadline and this line, and nothing may go out after the
+        // deadline.
+        if (recalled === 'deadline_exceeded' || deadlineError(deadline) !== undefined) {
             return { refused: 'deadline_exceeded' }
         }
 
