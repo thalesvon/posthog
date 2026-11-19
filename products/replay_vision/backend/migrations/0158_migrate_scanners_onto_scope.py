@@ -65,14 +65,17 @@ def _scope_from_targeting(targeting: dict) -> dict | None:
 
 def migrate_scanners_onto_scope(apps, schema_editor):
     ReplayScanner = apps.get_model("replay_vision", "ReplayScanner")
+    # The migration connection carries the lock_timeout that makes a contended row fail fast so the
+    # runner retries; the default connection has no such bound and would block the deploy instead.
+    alias = schema_editor.connection.alias
     now = timezone.now()
     last_pk = None
     while True:
         # Read and write in one transaction with the batch locked, so a scanner saved between the
         # two does not lose its edit to a stale copy. The stamp would make a retry skip that row.
         # Each batch commits alone, so an edit or a sweep waits on at most one batch's locks.
-        with transaction.atomic():
-            rows = ReplayScanner.objects.order_by("pk").select_for_update(of=("self",))
+        with transaction.atomic(using=alias):
+            rows = ReplayScanner.objects.using(alias).order_by("pk").select_for_update(of=("self",))
             if last_pk is not None:
                 rows = rows.filter(pk__gt=last_pk)
             batch = list(
@@ -108,7 +111,7 @@ def migrate_scanners_onto_scope(apps, schema_editor):
                     continue
                 scanner.scope = {**scope, "migrated_at": now.isoformat(), "migrated_from": migrated_from}
                 changed.append(scanner)
-            ReplayScanner.objects.bulk_update(changed, ["scanner_type", "scanner_config", "scope"])
+            ReplayScanner.objects.using(alias).bulk_update(changed, ["scanner_type", "scanner_config", "scope"])
 
 
 def restore_scanners_from_scope(apps, schema_editor):
@@ -117,11 +120,12 @@ def restore_scanners_from_scope(apps, schema_editor):
     Keyed on `scope.migrated_at`, so a scope written by hand or by the mirror is left alone.
     """
     ReplayScanner = apps.get_model("replay_vision", "ReplayScanner")
+    alias = schema_editor.connection.alias
     last_pk = None
     while True:
         # Locked and written in one transaction, for the same reason as the forward step.
-        with transaction.atomic():
-            rows = ReplayScanner.objects.order_by("pk").select_for_update(of=("self",))
+        with transaction.atomic(using=alias):
+            rows = ReplayScanner.objects.using(alias).order_by("pk").select_for_update(of=("self",))
             if last_pk is not None:
                 rows = rows.filter(pk__gt=last_pk)
             batch = list(
@@ -157,7 +161,7 @@ def restore_scanners_from_scope(apps, schema_editor):
                     }
                 scanner.scope = None
                 changed.append(scanner)
-            ReplayScanner.objects.bulk_update(
+            ReplayScanner.objects.using(alias).bulk_update(
                 changed, ["scanner_type", "scanner_config", "experiment_targeting", "scope"]
             )
 
