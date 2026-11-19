@@ -378,6 +378,8 @@ class BaseBatchExportInputs:
         data_interval_end: For manual runs, the end date of the batch. This should be set to `None` for regularly
             scheduled runs and for backfills.
         integration_id: The ID of the integration that contains the credentials for the destination.
+        use_new_events_schema: Read events_json even if the team and instance switches are off. Set from the
+            destination config, so users can move one export ahead of the rest. It can't turn the switches off.
     """
 
     batch_export_id: str
@@ -393,6 +395,7 @@ class BaseBatchExportInputs:
     backfill_details: BackfillDetails | None = None
     batch_export_model: BatchExportModelInput | None = None
     integration_id: int | None = None
+    use_new_events_schema: bool = False
 
     def __post_init__(self) -> None:
         """Coerce string values to their declared types.
@@ -1630,6 +1633,7 @@ class BatchExportInsertInputs:
     # Total rows staged for this run (from ClickHouse), used to report export progress
     records_total: int | None = None
     on_demand: bool = False
+    use_new_events_schema: bool = False
 
     def get_is_backfill(self) -> bool:
         """Needed for backwards compatibility with existing batch exports.

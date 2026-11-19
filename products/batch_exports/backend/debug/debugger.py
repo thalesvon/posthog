@@ -19,6 +19,7 @@ from rich.console import Console
 from posthog.integrations import IntegrationManager
 from posthog.models.integration import DatabricksIntegration, GoogleCloudServiceAccountIntegration
 from posthog.temporal.common.clickhouse import ClickHouseClient
+from posthog.utils import str_to_bool
 
 from products.batch_exports.backend.events_table import batch_exports_read_new_events_table
 from products.batch_exports.backend.models.batch_export import BatchExport, BatchExportDestination, BatchExportRun
@@ -468,7 +469,9 @@ class BatchExportsDebugger:
 
             fields = with_inserted_at_field(default_fields_for_destination(batch_export_run.parent.destination.type))
 
-            native_source = query_template is SELECT_FROM_EVENTS_VIEW_BACKFILL and batch_exports_read_new_events_table()
+            native_source = query_template is SELECT_FROM_EVENTS_VIEW_BACKFILL and batch_exports_read_new_events_table(
+                str_to_bool(batch_export_run.parent.destination.config.get("use_new_events_schema"))
+            )
 
             filters_str = ""
             if filters is not None and len(filters) > 0:
