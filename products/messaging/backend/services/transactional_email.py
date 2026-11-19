@@ -1016,6 +1016,8 @@ def _batch_answer_list(answer: dict[str, Any], expected: int) -> list[tuple[int,
         status_code, body = (result.get("status"), result.get("body")) if isinstance(result, dict) else (None, None)
         if not isinstance(status_code, int) or isinstance(status_code, bool) or not isinstance(body, dict):
             return None
+        if status_code != 202 and not 400 <= status_code <= 599:
+            return None
         if status_code == 202 and not (
             _is_message_id(body.get("invocation_id")) and isinstance(body.get("replayed"), bool)
         ):

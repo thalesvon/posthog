@@ -445,7 +445,7 @@ class TestTransactionalEmailBatch(APIBaseTest):
         [
             ("constant_that_is_not_json", "NaN", 400, "parse_error"),
             ("number_beyond_a_float", "1e400", 400, "parse_error"),
-            ("integer_beyond_a_float", "1" + "0" * 400, 400, "parse_error"),
+            ("integer_beyond_a_float", "1" + "0" * 4000, 400, "parse_error"),
             ("member_named_twice", '"Welcome", "subject": "Welcome again"', 400, "parse_error"),
             ("nesting_past_the_limit", "[" * 101 + "]" * 101, 400, "parse_error"),
             ("nesting_too_deep_to_encode", "[" * 50_000 + "]" * 50_000, 400, "parse_error"),
@@ -461,6 +461,7 @@ class TestTransactionalEmailBatch(APIBaseTest):
         response = self.psak.post(BATCH_URL, body.replace('"SUBJECT"', subject), content_type="application/json")
 
         assert (response.status_code, response.json()["code"]) == (expected_status, expected_code)
+        assert len(response.content) < 1024
         mock_post.assert_not_called()
 
     def test_reads_a_json_batch_whatever_charset_it_names(self, mock_post, _flag, _capture):
@@ -521,6 +522,13 @@ class TestTransactionalEmailBatch(APIBaseTest):
             "again within 24 hours with the same `idempotency_key`" in result["error"]["detail"]
             for result in (unstarted, not_queued, unrecognized)
         )
+        assert [
+            "may still go out" in result["error"]["detail"] for result in (unstarted, not_queued, unrecognized)
+        ] == [
+            False,
+            False,
+            True,
+        ]
         assert f"/hog_flows/{hog_flow_id}/" in mock_post.call_args.args[0]
 
     @parameterized.expand(PIPELINE_ANSWERS)
@@ -583,6 +591,10 @@ class TestTransactionalEmailBatch(APIBaseTest):
                         ACCEPTED, {"status": 202, "body": {"invocation_id": SECOND_MESSAGE_ID, "replayed": "no"}}
                     )
                 },
+            ),
+            (
+                "an_answer_with_a_success_status_and_a_refusal",
+                {"return_value": _batch_answer(ACCEPTED, {"status": 200, "body": {"error": "recipient_suppressed"}})},
             ),
             (
                 "a_body_that_is_not_json",

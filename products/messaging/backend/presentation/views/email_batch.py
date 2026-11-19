@@ -139,13 +139,13 @@ def _refused_constant(text: str) -> float:
 
 def _finite(text: str) -> float:
     if not math.isfinite(value := float(text)):
-        raise ValueError(f"{text} is out of range")
+        raise ValueError("a number is out of range")
     return value
 
 
 def _finite_int(text: str) -> int:
     if abs(value := int(text)) > sys.float_info.max:
-        raise ValueError(f"{text} is out of range")
+        raise ValueError("a number is out of range")
     return value
 
 
