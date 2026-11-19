@@ -7,6 +7,7 @@ import {
     TemplateBatchRequestSchema,
     batchDeadlineMs,
     readBatchBody,
+    withinDeadline,
 } from './transactional-email-batch'
 
 describe('transactional email batch', () => {
@@ -56,6 +57,23 @@ describe('transactional email batch', () => {
             body.end(text.slice(1))
 
             expect(await read).toEqual({ read: 'deadline_exceeded' })
+        })
+    })
+
+    describe('withinDeadline', () => {
+        afterEach(() => jest.restoreAllMocks())
+
+        it('answers deadline_exceeded for work that finishes after its deadline passed', async () => {
+            const deadline = deadlineAfter(60_000)
+            let now = performance.now()
+            jest.spyOn(performance, 'now').mockImplementation(() => now)
+            let finish: (found: string) => void = () => {}
+            const work = withinDeadline(new Promise<string>((resolve) => (finish = resolve)), deadline)
+
+            now += 60_000
+            finish('found')
+
+            expect(await work).toEqual('deadline_exceeded')
         })
     })
 

@@ -15,7 +15,6 @@ import {
     HogFunctionInvocationGlobals,
     IntegrationType,
 } from '../../types'
-import { deadlineError } from '../../utils/deadline'
 import { EncryptedFields } from '../../utils/encryption-utils'
 import { convertToHogFunctionFilterGlobal } from '../../utils/hog-function-filtering'
 import { createCanceledInvocationResult } from '../../utils/invocation-utils'
@@ -475,8 +474,7 @@ export class TransactionalSends {
             ),
             deadline
         )
-        // A stalled event loop can run a finished lookup before the deadline's abort timer, so read the clock as well.
-        if (checks === 'deadline_exceeded' || deadlineError(deadline) !== undefined) {
+        if (checks === 'deadline_exceeded') {
             return { refused: 'deadline_exceeded' }
         }
         if (checks.refusal) {
@@ -494,7 +492,7 @@ export class TransactionalSends {
                 null
             )
             invocation.id = transactionalEmailRunId(team.id, request.idempotency_key)
-            return { request, invocation, fingerprint }
+            return { invocation, fingerprint }
         })
         stages.start('idempotency')
         const recalled = await withinDeadline(
@@ -504,7 +502,7 @@ export class TransactionalSends {
             ),
             deadline
         )
-        if (recalled === 'deadline_exceeded' || deadlineError(deadline) !== undefined) {
+        if (recalled === 'deadline_exceeded') {
             return { refused: 'deadline_exceeded' }
         }
 
