@@ -692,18 +692,16 @@ def send_email_batch(
 
 
 def send_code_email_batch(team: Team, email: CodeEmail, recipients: Sequence[BatchRecipient]) -> EmailBatchSent:
-    with transactional_email_stage("workflow_lookup"):
-        _code_send_sender(team, email, provision_sandbox=False)
-        template = _template_for_key(team.id, email.key)
-        template_workflow_id = None if template is None else _template_workflow_id(team.id, template, email.sensitive)
-        if template_workflow_id is None:
-            _require_key_room(team.id, email.key)
     refusals = tuple(recipient.refusal for recipient in recipients if recipient.refusal is not None)
     if len(refusals) == len(recipients):
+        with transactional_email_stage("workflow_lookup"):
+            _code_send_sender(team, email, provision_sandbox=False)
+            if _code_template_workflow_id(team.id, email) is None:
+                _require_key_room(team.id, email.key)
         return EmailBatchSent(results=refusals)
     with transactional_email_stage("workflow_lookup"):
         accepted_send, sandbox_warning = _accepted_send(team, email)
-        hog_flow_id = template_workflow_id or _key_workflow_id(team.id, email.key)
+        hog_flow_id = _code_template_workflow_id(team.id, email) or _key_workflow_id(team.id, email.key)
     return _queue_batch(
         team.id,
         hog_flow_id,
@@ -712,6 +710,11 @@ def send_code_email_batch(team: Team, email: CodeEmail, recipients: Sequence[Bat
         send_accepted_transactional_email_batch,
         sandbox_warning=sandbox_warning,
     )
+
+
+def _code_template_workflow_id(team_id: int, email: CodeEmail) -> UUID | None:
+    template = _template_for_key(team_id, email.key)
+    return None if template is None else _template_workflow_id(team_id, template, email.sensitive)
 
 
 def _within_batch_shared_limit(shared: dict[str, Any] | CodeEmail | None) -> bool:

@@ -52,12 +52,12 @@ UNCONFIRMED_EMAIL = (
     "with the same `idempotency_key`, so it goes out once."
 )
 NOT_ATTEMPTED_EMAIL = (
-    "PostHog stopped before this request sent the email. Send it again with the same `idempotency_key`, so it goes "
-    "out once even if an earlier request queued it."
+    "PostHog stopped before this request sent the email. Send it again within 24 hours with the same "
+    "`idempotency_key`, so it goes out once even if an earlier request queued it."
 )
 NOT_QUEUED_EMAIL = (
-    "The email pipeline failed before this request queued the email. Send it again with the same `idempotency_key`, "
-    "so it goes out once even if an earlier request queued it."
+    "The email pipeline failed before this request queued the email. Send it again within 24 hours with the same "
+    "`idempotency_key`, so it goes out once even if an earlier request queued it."
 )
 
 
@@ -245,7 +245,7 @@ class EmailBatchResultStatus(LabeledStrEnum):
 class EmailBatchErrorSerializer(serializers.Serializer):
     code = serializers.CharField(
         help_text="Why this recipient's email wasn't queued, the code a single send would answer, such as "
-        "`recipient_suppressed`. `not_attempted` means PostHog stopped before this email, so nothing was queued."
+        "`recipient_suppressed`. `not_attempted` means PostHog stopped before this request sent the email."
     )
     detail = serializers.CharField(help_text="What happened and what to do next, in words a person can read.")
     status = serializers.IntegerField(help_text="The HTTP status a single send of this email would answer.")

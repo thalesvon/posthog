@@ -517,6 +517,10 @@ class TestTransactionalEmailBatch(APIBaseTest):
             {"code": "delivery_unavailable", "detail": NOT_QUEUED_EMAIL, "status": 503, "retryable": True},
             {"code": "delivery_unavailable", "detail": UNCONFIRMED_EMAIL, "status": 503, "retryable": True},
         ]
+        assert all(
+            "again within 24 hours with the same `idempotency_key`" in result["error"]["detail"]
+            for result in (unstarted, not_queued, unrecognized)
+        )
         assert f"/hog_flows/{hog_flow_id}/" in mock_post.call_args.args[0]
 
     @parameterized.expand(PIPELINE_ANSWERS)
