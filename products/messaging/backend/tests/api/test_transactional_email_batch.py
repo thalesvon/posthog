@@ -33,6 +33,7 @@ from products.messaging.backend.presentation.views.message_templates import (
     TransactionalEmailTeamBurstThrottle,
     TransactionalEmailTeamSustainedThrottle,
 )
+from products.messaging.backend.services import transactional_email
 from products.messaging.backend.services.transactional_email import PIPELINE_REFUSALS, make_transactional
 from products.messaging.backend.tests.fake_cdp_api import _response
 from products.workflows.backend.facade.api import set_default_email_sender_if_unset
@@ -437,12 +438,13 @@ class TestTransactionalEmailBatch(APIBaseTest):
             {"status": 400, "body": {"error": "not_sendable"}},
             {"status": 503, "body": {"error": "not_attempted"}},
             {"status": 503, "body": {"error": "delivery_unavailable", "may_still_go_out": False}},
+            {"status": 503, "body": {"may_still_go_out": False}},
         )
 
-        response = self._batch(form, self._recipients(4))
+        response = self._batch(form, self._recipients(5))
 
         assert response.status_code == status.HTTP_200_OK, response.json()
-        replayed, refused, *unstarted = response.json()["results"]
+        replayed, refused, *unstarted, unrecognized = response.json()["results"]
         assert replayed == {"message_id": MESSAGE_ID, "status": "queued", "replayed": True}
         assert {name: refused["error"][name] for name in ("code", "status", "retryable")} == {
             "code": "transactional_email_paused",
@@ -452,6 +454,7 @@ class TestTransactionalEmailBatch(APIBaseTest):
         assert [{name: result["error"][name] for name in ("code", "status", "retryable")} for result in unstarted] == [
             {"code": "not_attempted", "status": 503, "retryable": True}
         ] * 2
+        assert (unrecognized["error"]["code"], unrecognized["error"]["retryable"]) == ("delivery_unavailable", True)
         assert f"/hog_flows/{hog_flow_id}/" in mock_post.call_args.args[0]
 
     @parameterized.expand(PIPELINE_ANSWERS)
@@ -610,6 +613,26 @@ class TestTransactionalEmailBatch(APIBaseTest):
         assert [result["error"]["code"] for result in response.json()["results"]] == ["invalid_recipient"]
         assert not TransactionalEmailKey.objects.for_team(self.team.id, canonical=True).exists()
         assert HogFlow.objects.filter(team=self.team).count() == workflows
+        mock_post.assert_not_called()
+
+    @parameterized.expand(
+        [
+            ("sensitive_template_marked_not_sensitive", True, 100, "sensitive_template"),
+            ("new_key_past_the_key_limit", False, 0, "too_many_keys"),
+        ]
+    )
+    def test_a_code_batch_with_no_recipient_it_can_address_still_refuses_the_shared_email(
+        self, mock_post, _flag, _capture, _name, sensitive_template, key_limit, code
+    ):
+        MessageTemplate.objects.filter(id=self.template.id).update(
+            key="welcome" if sensitive_template else None, sensitive=sensitive_template
+        )
+
+        with patch.object(transactional_email, "TRANSACTIONAL_EMAIL_KEY_LIMIT", key_limit):
+            response = self._batch("code", [{"to": "not an address", "idempotency_key": "key-0"}], sensitive=False)
+
+        assert (response.status_code, response.json()["code"]) == (status.HTTP_400_BAD_REQUEST, code)
+        assert not TransactionalEmailKey.objects.for_team(self.team.id, canonical=True).exists()
         mock_post.assert_not_called()
 
     def test_a_batch_while_its_flag_is_off_spends_no_send(self, mock_post, flag, _capture):

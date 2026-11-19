@@ -518,20 +518,23 @@ def _require_active(team_id: int, hog_flow_id: UUID) -> None:
         raise TransactionalEmailPaused("This email's workflow isn't active. Turn it back on to send.")
 
 
-def _code_email_workflow_id(team_id: int, key: str, sensitive: bool | None, *, require_active: bool = True) -> UUID:
+def _code_email_workflow_id(team_id: int, key: str, sensitive: bool | None) -> UUID:
     template = _template_for_key(team_id, key)
     if template is not None:
-        if sensitive is False and template.sensitive:
-            raise SensitiveTemplate(
-                "This email's template is marked sensitive, so `sensitive` can't be false. "
-                "Leave `sensitive` out, or unmark the template."
-            )
-        hog_flow_id = _sendable_workflow_id(team_id, template)
+        hog_flow_id = _template_workflow_id(team_id, template, sensitive)
     else:
         hog_flow_id = _key_workflow_id(team_id, key)
-    if require_active:
-        _require_active(team_id, hog_flow_id)
+    _require_active(team_id, hog_flow_id)
     return hog_flow_id
+
+
+def _template_workflow_id(team_id: int, template: MessageTemplate, sensitive: bool | None) -> UUID:
+    if sensitive is False and template.sensitive:
+        raise SensitiveTemplate(
+            "This email's template is marked sensitive, so `sensitive` can't be false. "
+            "Leave `sensitive` out, or unmark the template."
+        )
+    return _sendable_workflow_id(team_id, template)
 
 
 def _template_for_key(team_id: int, key: str) -> MessageTemplate | None:
@@ -555,15 +558,26 @@ def _key_workflow_id(team_id: int, key: str) -> UUID:
             known.delete()
         keys = TransactionalEmailKey.objects.for_team(team_id, canonical=True)
         if keys.count() >= TRANSACTIONAL_EMAIL_KEY_LIMIT:
-            raise TooManyKeys(
-                f"This project has reached its limit of {TRANSACTIONAL_EMAIL_KEY_LIMIT} template keys, so it can't "
-                "send under a new one. Use one template_key for each type of email, such as `order-shipped`, and "
-                "reuse it for every recipient."
-            )
+            raise _too_many_keys()
         hog_flow_id = create_code_email_workflow(team_id=team_id, key=key)
         key_id = str(keys.create(team_id=team_id, key=key, hog_flow_id=hog_flow_id).id)
         transaction.on_commit(lambda: _queue_source_detection(team_id, key_id), robust=True)
         return hog_flow_id
+
+
+def _require_key_room(team_id: int, key: str) -> None:
+    if known_key(team_id, key) is not None:
+        return
+    if TransactionalEmailKey.objects.for_team(team_id, canonical=True).count() >= TRANSACTIONAL_EMAIL_KEY_LIMIT:
+        raise _too_many_keys()
+
+
+def _too_many_keys() -> TooManyKeys:
+    return TooManyKeys(
+        f"This project has reached its limit of {TRANSACTIONAL_EMAIL_KEY_LIMIT} template keys, so it can't "
+        "send under a new one. Use one template_key for each type of email, such as `order-shipped`, and "
+        "reuse it for every recipient."
+    )
 
 
 def _queue_source_detection(team_id: int, key_id: str) -> None:
@@ -687,11 +701,15 @@ def send_email_batch(
 def send_code_email_batch(team: Team, email: CodeEmail, recipients: Sequence[BatchRecipient]) -> EmailBatchSent:
     with transactional_email_stage("workflow_lookup"):
         accepted_send, sandbox_warning = _accepted_send(team, email)
+        template = _template_for_key(team.id, email.key)
+        template_workflow_id = None if template is None else _template_workflow_id(team.id, template, email.sensitive)
+        if template_workflow_id is None:
+            _require_key_room(team.id, email.key)
     refusals = tuple(recipient.refusal for recipient in recipients if recipient.refusal is not None)
     if len(refusals) == len(recipients):
         return EmailBatchSent(results=refusals)
     with transactional_email_stage("workflow_lookup"):
-        hog_flow_id = _code_email_workflow_id(team.id, email.key, email.sensitive, require_active=False)
+        hog_flow_id = template_workflow_id or _key_workflow_id(team.id, email.key)
     return _queue_batch(
         team.id,
         hog_flow_id,
@@ -1029,7 +1047,11 @@ def _batch_result(
     team_id: int, hog_flow_id: UUID, answer: tuple[int, dict[str, Any]], sandbox_warning: SendWarning | None
 ) -> QueuedEmail | TransactionalEmailError | DeliveryUnavailable:
     status_code, body = answer
-    if status_code == 503 and (_refusal_code(body) == "not_attempted" or body.get("may_still_go_out") is False):
+    refusal_code = _refusal_code(body)
+    if status_code == 503 and (
+        refusal_code == "not_attempted"
+        or (refusal_code == "delivery_unavailable" and body.get("may_still_go_out") is False)
+    ):
         return SendNotAttempted()
     try:
         return _queued_email(
