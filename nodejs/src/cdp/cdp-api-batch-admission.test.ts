@@ -1,5 +1,6 @@
 import { createMockJobQueue } from '../../tests/helpers/mocks/job-queue.mock'
 
+import { Server } from 'http'
 import jwt from 'jsonwebtoken'
 import supertest from 'supertest'
 import express from 'ultimate-express'
@@ -18,6 +19,7 @@ describe('a transactional email batch on a pod that requires the internal secret
     let hub: Hub
     let api: CdpApi
     let app: express.Application
+    let server: Server
 
     beforeAll(async () => {
         hub = await createHub({ SITE_URL: 'http://localhost:8000', CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_REQUESTS: 0 })
@@ -28,9 +30,11 @@ describe('a transactional email batch on a pod that requires the internal secret
         )
         app = setupExpressApp({ jsonBodyLimit: '1kb', internalApiSecret: 'shared-secret' })
         app.use('/', api.router())
+        server = app.listen(0, () => {})
     })
 
     afterAll(async () => {
+        server.close()
         await api.stop()
         await closeHub(hub)
     })
