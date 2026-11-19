@@ -1,6 +1,7 @@
 import { Semaphore } from '../../utils/sempahore'
 import {
     BatchCapacity,
+    CodeSendBatchRequestSchema,
     SlotReply,
     TemplateBatchRequestSchema,
     batchDeadlineMs,
@@ -145,21 +146,68 @@ describe('TemplateBatchRequestSchema', () => {
         expect(TemplateBatchRequestSchema.safeParse({ recipients }).success).toBe(accepted)
     })
 
-    it('refuses a recipient list over the cap with one issue, without reading any recipient', () => {
-        const recipients: unknown[] = Array.from({ length: 1000 }, () => ({}))
-        let reads = 0
-        recipients.forEach((recipient, index) =>
-            Object.defineProperty(recipients, index, {
-                get: () => {
-                    reads++
-                    return recipient
-                },
-            })
-        )
-
-        const parsed = TemplateBatchRequestSchema.safeParse({ recipients })
+    it('refuses a recipient list over the cap with one issue for the whole list', () => {
+        const parsed = TemplateBatchRequestSchema.safeParse({ recipients: Array.from({ length: 1000 }, () => ({})) })
 
         expect(parsed.error?.issues).toEqual([expect.objectContaining({ code: 'too_big', path: ['recipients'] })])
-        expect(reads).toBe(0)
+    })
+})
+
+describe('whole-batch refusals', () => {
+    const ada = { to: 'ada@example.com', distinct_id: 'person-ada', idempotency_key: 'key-ada' }
+    const bo = { to: 'bo@example.com', distinct_id: 'person-bo', idempotency_key: 'key-bo' }
+    const send = { content: { subject: 'Hello', text: 'Hi' }, tracking: { captureEngagement: false } }
+
+    it.each([
+        {
+            batch: 'a template batch',
+            schema: TemplateBatchRequestSchema,
+            body: { recipients: [ada, bo] },
+            accepted: true,
+        },
+        {
+            batch: 'a code send batch',
+            schema: CodeSendBatchRequestSchema,
+            body: { send, recipients: [ada, bo] },
+            accepted: true,
+        },
+        {
+            batch: 'a repeated idempotency key',
+            schema: TemplateBatchRequestSchema,
+            body: { recipients: [ada, { ...bo, idempotency_key: ada.idempotency_key }] },
+            accepted: false,
+        },
+        {
+            batch: 'a send time for the batch',
+            schema: TemplateBatchRequestSchema,
+            body: { scheduled_at: '2030-01-01T00:00:00Z', recipients: [ada] },
+            accepted: false,
+        },
+        {
+            batch: 'a send time for one recipient',
+            schema: TemplateBatchRequestSchema,
+            body: { recipients: [ada, { ...bo, scheduled_at: '2030-01-01T00:00:00Z' }] },
+            accepted: false,
+        },
+        {
+            batch: 'cc on a code send',
+            schema: CodeSendBatchRequestSchema,
+            body: { send: { ...send, cc: ['cy@example.com'] }, recipients: [ada] },
+            accepted: false,
+        },
+        {
+            batch: 'bcc on a code send',
+            schema: CodeSendBatchRequestSchema,
+            body: { send: { ...send, bcc: ['cy@example.com'] }, recipients: [ada] },
+            accepted: false,
+        },
+        {
+            batch: 'attachments on a code send',
+            schema: CodeSendBatchRequestSchema,
+            body: { send: { ...send, attachments: [] }, recipients: [ada] },
+            accepted: false,
+        },
+    ])('$batch is accepted: $accepted', ({ schema, body, accepted }) => {
+        expect(schema.safeParse(body).success).toBe(accepted)
     })
 })

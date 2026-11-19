@@ -44,9 +44,6 @@ export interface SetupExpressAppOptions {
 
 const READ_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
 
-// Routes that parse their own body after admission.
-const ROUTE_PARSED_BODY_PATTERNS = TRANSACTIONAL_EMAIL_BATCH_PATH_PATTERNS
-
 export function setupCommonRoutes(
     app: express.Application,
     services: Pick<PluginServerService, 'id' | 'healthcheck' | 'readinessCheck'>[]
@@ -99,8 +96,11 @@ export function setupExpressApp(options: SetupExpressAppOptions = {}): express.A
             ;(req as any).rawBody = buf.toString('utf8')
         },
     })
+    // A batch route parses its own body once it admits the request.
     app.use((req: Request, res: Response, next: NextFunction) =>
-        ROUTE_PARSED_BODY_PATTERNS.some((pattern) => pattern.test(req.path)) ? next() : parseJson(req, res, next)
+        TRANSACTIONAL_EMAIL_BATCH_PATH_PATTERNS.some((pattern) => pattern.test(req.path))
+            ? next()
+            : parseJson(req, res, next)
     )
 
     // ultimate-express reports an oversized body as a plain Error with no

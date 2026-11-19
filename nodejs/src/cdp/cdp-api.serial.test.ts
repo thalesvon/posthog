@@ -1,6 +1,11 @@
 // Serial: resets shared Postgres and relies on the reset-created default team.
 import { createInMemoryJobQueue, createMockJobQueue } from '../../tests/helpers/mocks/job-queue.mock'
-import { holdKafkaAcks, mockProducer, mockProducerObserver } from '../../tests/helpers/mocks/producer.mock'
+import {
+    holdKafkaAcks,
+    kafkaRecordsOn,
+    mockProducer,
+    mockProducerObserver,
+} from '../../tests/helpers/mocks/producer.mock'
 import { mockFetch } from '../../tests/helpers/mocks/request.mock'
 
 import { KafkaProducerObserver } from '~/tests/helpers/mocks/producer.spy'
@@ -5550,6 +5555,35 @@ describe('CDP API', () => {
             })
 
             it.each([
+                [
+                    'a repeated idempotency key',
+                    TEMPLATE,
+                    () => {
+                        const ada = recipient('ada@example.com')
+                        return {
+                            recipients: [ada, recipient('bo@example.com', { idempotency_key: ada.idempotency_key })],
+                        }
+                    },
+                ],
+                [
+                    'copies on its send',
+                    CODE,
+                    () => ({
+                        send: { ...codeSend, cc: ['cy@example.com'] },
+                        recipients: [recipient('ada@example.com')],
+                    }),
+                ],
+            ])(
+                'refuses a whole batch carrying %s and sends to none of its recipients',
+                async (_case, route, payload) => {
+                    const res = await sendBatch(route, payload())
+
+                    expect(res.status).toEqual(400)
+                    expect(await storedRuns()).toEqual([])
+                }
+            )
+
+            it.each([
                 ['transactional_email', 'template_batch'],
                 ['transactional_email/send', 'code_send_batch'],
             ])('refuses a batch token on the single route %s', async (route, kind) => {
@@ -5573,7 +5607,7 @@ describe('CDP API', () => {
                 async (_mode, shadow, async, route, inserts, produces) => {
                     api['config'].CDP_INTAKE_KAFKA_SHADOW_TEAMS = shadow ? String(team.id) : ''
                     api['config'].CDP_INTAKE_KAFKA_ASYNC_TEAMS = async ? String(team.id) : ''
-                    const produced = observeKafka()
+                    const received = kafkaRecordsOn(api['config'].CDP_INTAKE_TRANSACTIONAL_EMAIL_TOPIC)
                     try {
                         const res = await sendBatch(route, {
                             ...(route === CODE ? { send: codeSend } : { variables: body.variables }),
@@ -5588,7 +5622,7 @@ describe('CDP API', () => {
                             String(body.invocation_id)
                         )
                         expect((await storedRuns()).map(({ id }) => id).sort()).toEqual(inserts ? runIds.sort() : [])
-                        const intakeRecords = produced().filter((message) => message.kind === 'transactional-email')
+                        const intakeRecords = received().map((value) => parseJSON(value.toString()))
                         expect(intakeRecords.map((message) => message.job.id).sort()).toEqual(
                             produces ? runIds.sort() : []
                         )

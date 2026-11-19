@@ -52,11 +52,21 @@ export const mockProducerObserver = new KafkaProducerObserver(mockProducer)
 
 const mockBroker = require('~/common/kafka/producer')._broker as { produce: jest.Mock }
 
+// Returns the values the broker got on `topic` since this call.
+export const kafkaRecordsOn = (topic: string): (() => Buffer[]) => {
+    const from = mockBroker.produce.mock.calls.length
+    return () =>
+        mockBroker.produce.mock.calls
+            .slice(from)
+            .filter(([calledTopic]) => calledTopic === topic)
+            .map(([, , value]) => value as Buffer)
+}
+
 // `release()` also makes the broker ack at once again. `received()` returns the values the broker got on `topic`
 // since the hold started, released or not.
 export const holdKafkaAcks = (topic: string): { release: () => void; received: () => Buffer[] } => {
     const deliver = mockBroker.produce.getMockImplementation()!
-    const from = mockBroker.produce.mock.calls.length
+    const received = kafkaRecordsOn(topic)
     let ack: () => void = () => {}
     const acked = new Promise<void>((resolve) => (ack = resolve))
     mockBroker.produce.mockImplementation((...args: unknown[]) =>
@@ -67,10 +77,6 @@ export const holdKafkaAcks = (topic: string): { release: () => void; received: (
             ack()
             mockBroker.produce.mockImplementation(deliver)
         },
-        received: () =>
-            mockBroker.produce.mock.calls
-                .slice(from)
-                .filter(([calledTopic]) => calledTopic === topic)
-                .map(([, , value]) => value as Buffer),
+        received,
     }
 }
