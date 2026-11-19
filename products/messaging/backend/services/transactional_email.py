@@ -1006,12 +1006,22 @@ def _batch_answer_list(answer: dict[str, Any], expected: int) -> list[tuple[int,
         status_code, body = (result.get("status"), result.get("body")) if isinstance(result, dict) else (None, None)
         if not isinstance(status_code, int) or isinstance(status_code, bool) or not isinstance(body, dict):
             return None
-        if status_code == 202 and not (isinstance(body.get("invocation_id"), str) and body["invocation_id"]):
+        if status_code == 202 and not _is_message_id(body.get("invocation_id")):
             return None
         if not isinstance(body.get("replayed", False), bool):
             return None
         answers.append((status_code, body))
     return answers
+
+
+def _is_message_id(value: Any) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        value.encode()
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def _batch_result(

@@ -14,7 +14,9 @@ from requests.structures import CaseInsensitiveDict
 from rest_framework import status
 from rest_framework.test import APIClient
 
+from posthog import rate_limit
 from posthog.models import ProjectSecretAPIKey
+from posthog.models.instance_setting import override_instance_config
 from posthog.models.integration import Integration
 from posthog.models.personal_api_key import hash_key_value
 from posthog.models.utils import generate_random_token_secret
@@ -292,6 +294,20 @@ class TestTransactionalEmailBatch(APIBaseTest):
                 "recipients__0__identifiers",
             ),
             (
+                "recipient_unknown_field_after_an_empty_one",
+                "template",
+                {"recipients": [{**RECIPIENT, "": 1, "mesage_data": {"n": 1}}]},
+                400,
+                "recipients__0__",
+            ),
+            (
+                "recipient_field_name_that_is_not_valid_unicode",
+                "template",
+                {"recipients": [{**RECIPIENT, "\ud800": 1}]},
+                400,
+                "recipients__0__\\ud800",
+            ),
+            (
                 "key_of_a_refused_address_repeated_as_text",
                 "template",
                 {"recipients": [{"to": "not an address", "idempotency_key": 7}, {**RECIPIENT, "idempotency_key": "7"}]},
@@ -450,6 +466,10 @@ class TestTransactionalEmailBatch(APIBaseTest):
                 {"return_value": _batch_answer(ACCEPTED, {"status": 202, "body": {"invocation_id": ""}})},
             ),
             (
+                "an_answer_with_an_invocation_id_that_is_not_valid_unicode",
+                {"return_value": _batch_answer(ACCEPTED, {"status": 202, "body": {"invocation_id": "\ud800"}})},
+            ),
+            (
                 "an_answer_with_a_replay_marker_that_is_not_a_bool",
                 {
                     "return_value": _batch_answer(
@@ -554,13 +574,18 @@ class TestTransactionalEmailBatch(APIBaseTest):
         assert HogFlow.objects.filter(team=self.team).count() == workflows
         mock_post.assert_not_called()
 
-    @patch("posthog.rate_limit.team_is_allowed_to_bypass_throttle", return_value=False)
-    @patch("posthog.rate_limit.is_rate_limit_enabled", return_value=True)
-    def test_a_batch_while_its_flag_is_off_spends_no_send(self, _enabled, _bypass, mock_post, flag, _capture):
+    def test_a_batch_while_its_flag_is_off_spends_no_send(self, mock_post, flag, _capture):
         flag.side_effect = lambda key, *_args, **_kwargs: key != EMAIL_BATCH_FLAG
         mock_post.return_value = MagicMock(status_code=202, json=lambda: {"invocation_id": "single"})
+        rate_limit.is_rate_limit_enabled.cache_clear()
+        rate_limit.get_team_allow_list.cache_clear()
+        self.addCleanup(rate_limit.is_rate_limit_enabled.cache_clear)
+        self.addCleanup(rate_limit.get_team_allow_list.cache_clear)
 
-        with patch.object(TransactionalEmailTeamBurstThrottle, "rate", "1/minute"):
+        with (
+            override_instance_config("RATE_LIMIT_ENABLED", True),
+            patch.object(TransactionalEmailTeamBurstThrottle, "rate", "1/minute"),
+        ):
             hidden = self._batch("template")
             single = self._single("template")
             hidden_past_the_budget = self._batch("template")

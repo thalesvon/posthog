@@ -217,7 +217,8 @@ def refused_batch_field(data: Any, *, takes_template_key: bool) -> ExplainedRefu
             continue
         if field := next((field for field in BATCH_REFUSED_FIELDS if field in recipient), None):
             return _field_refusal(f"recipients__{index}__{field}")
-        if field := next((field for field in recipient if field not in RECIPIENT_FIELDS), None):
+        if (unknown := next((field for field in recipient if field not in RECIPIENT_FIELDS), None)) is not None:
+            field = str(unknown).encode("utf-8", "backslashreplace").decode()
             return ExplainedRefusal(
                 f"A batch recipient doesn't take `{field}`, so PostHog didn't send the batch.",
                 code="field_not_accepted",
