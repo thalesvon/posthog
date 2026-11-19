@@ -49,18 +49,12 @@ from products.workflows.backend.facade.team_extension import TeamWorkflowsConfig
 
 BATCH_URL = "/api/messaging/send/email_batch/"
 SINGLE_URL = "/api/messaging/send/email/"
-MESSAGE_ID = "0196a8f0-0000-7000-8000-000000000001"
-SECOND_MESSAGE_ID = "0196a8f0-0000-7000-8000-000000000002"
-ACCEPTED: dict[str, Any] = {
-    "status": 202,
-    "body": {
-        "invocation_id": MESSAGE_ID,
-        "status": "queued",
-        "scheduled_at": None,
-        "replayed": False,
-        "attachment_count": 0,
-        "attachment_bytes": 0,
-    },
+QUEUED_BODY: dict[str, Any] = {
+    "status": "queued",
+    "scheduled_at": None,
+    "replayed": False,
+    "attachment_count": 0,
+    "attachment_bytes": 0,
 }
 RECIPIENT = {"to": "a@example.com", "idempotency_key": "key-a"}
 
@@ -115,6 +109,10 @@ def _sent_by(sender_kind: str | None) -> dict[str, str]:
     return {"sender_kind": sender_kind} if sender_kind else {}
 
 
+def _accepted(message_id: str, **body: Any) -> dict[str, Any]:
+    return {"status": 202, "body": {**QUEUED_BODY, "invocation_id": message_id, **body}}
+
+
 def _batch_answer(*results: dict[str, Any]) -> requests.Response:
     return _response(200, {"results": list(results)})
 
@@ -166,6 +164,12 @@ class TestTransactionalEmailBatch(APIBaseTest):
             return {"template_key": "welcome", "subject": "Welcome", "html": "<p>Hi</p>"}
         return {"template_id": str(self.template.id), "message_data": {"link": "https://example.com/a", "n": 1}}
 
+    def _id(self, key: str) -> str:
+        return str(keyed_message_id(self.team.id, key))
+
+    def _queued_answer(self, count: int) -> requests.Response:
+        return _batch_answer(*(_accepted(self._id(f"key-{index}")) for index in range(count)))
+
     def _recipients(self, count: int) -> list[dict[str, Any]]:
         return [{"to": f"user{index}@example.com", "idempotency_key": f"key-{index}"} for index in range(count)]
 
@@ -186,9 +190,7 @@ class TestTransactionalEmailBatch(APIBaseTest):
         merged_data = {"message_data": {"link": "https://example.com/a", "n": 2}} if form == "template" else {}
         assert self._single(form, distinct_id="user-0", **merged_data).status_code == status.HTTP_202_ACCEPTED
         single = _forwarded(mock_post.call_args)
-        mock_post.return_value = _batch_answer(
-            ACCEPTED, {"status": 202, "body": {"invocation_id": SECOND_MESSAGE_ID, "replayed": False}}
-        )
+        mock_post.return_value = self._queued_answer(2)
         first_recipient: dict[str, Any] = {
             "to": "user0@example.com",
             "distinct_id": "user-0",
@@ -202,8 +204,8 @@ class TestTransactionalEmailBatch(APIBaseTest):
         assert response.status_code == status.HTTP_200_OK, response.json()
         assert response.json() == {
             "results": [
-                {"message_id": MESSAGE_ID, "status": "queued", "replayed": False},
-                {"message_id": SECOND_MESSAGE_ID, "status": "queued", "replayed": False},
+                {"message_id": self._id("key-0"), "status": "queued", "replayed": False},
+                {"message_id": self._id("key-1"), "status": "queued", "replayed": False},
             ]
         }
         url, forwarded = mock_post.call_args.args[0], _forwarded(mock_post.call_args)
@@ -231,7 +233,7 @@ class TestTransactionalEmailBatch(APIBaseTest):
         mock_post.return_value = MagicMock(status_code=202, json=lambda: {"invocation_id": "single"})
         self._single("template")
         self._single("code")
-        mock_post.return_value = _batch_answer(ACCEPTED, ACCEPTED)
+        mock_post.return_value = self._queued_answer(2)
         self._batch("template")
         self._batch("code")
 
@@ -256,7 +258,7 @@ class TestTransactionalEmailBatch(APIBaseTest):
         ]
 
     def test_a_recipient_the_pipeline_cannot_address_fails_only_its_own_result(self, mock_post, _flag, _capture):
-        mock_post.return_value = _batch_answer(ACCEPTED)
+        mock_post.return_value = _batch_answer(_accepted(self._id("key-1")))
         recipients: list[dict[str, Any]] = [
             {"to": "{{person.email}}@example.com", "idempotency_key": "key-0"},
             {"to": "user1@example.com", "idempotency_key": "key-1"},
@@ -273,12 +275,9 @@ class TestTransactionalEmailBatch(APIBaseTest):
             False,
         )
         assert "{ or }" in refused["error"]["detail"]
-        assert queued == {"message_id": MESSAGE_ID, "status": "queued", "replayed": False}
+        assert queued == {"message_id": self._id("key-1"), "status": "queued", "replayed": False}
         assert malformed["error"]["code"] == "invalid_recipient"
-        assert [refused["message_id"], malformed["message_id"]] == [
-            str(keyed_message_id(self.team.id, "key-0")),
-            str(keyed_message_id(self.team.id, "key-2")),
-        ]
+        assert [refused["message_id"], malformed["message_id"]] == [self._id("key-0"), self._id("key-2")]
         assert [recipient["to"] for recipient in _forwarded(mock_post.call_args)["recipients"]] == ["user1@example.com"]
 
     @parameterized.expand(
@@ -459,13 +458,15 @@ class TestTransactionalEmailBatch(APIBaseTest):
         ]
     )
     def test_queues_every_recipient_of_a_json_batch(self, mock_post, _flag, _capture, _name, count, content_type):
-        mock_post.return_value = _batch_answer(*[ACCEPTED] * count)
+        mock_post.return_value = self._queued_answer(count)
         body = {**self._email("template"), "recipients": self._recipients(count)}
 
         response = self.psak.post(BATCH_URL, json.dumps(body), content_type=content_type)
 
         assert response.status_code == status.HTTP_200_OK, response.json()
-        assert [result["status"] for result in response.json()["results"]] == ["queued"] * count
+        assert [(result["message_id"], result["status"]) for result in response.json()["results"]] == [
+            (self._id(f"key-{index}"), "queued") for index in range(count)
+        ]
 
     def _form_encoded_batch(self) -> Any:
         return self.psak.post(
@@ -507,7 +508,7 @@ class TestTransactionalEmailBatch(APIBaseTest):
         mock_post.assert_not_called()
 
     def test_reads_a_json_batch_whatever_charset_it_names(self, mock_post, _flag, _capture):
-        mock_post.return_value = _batch_answer(ACCEPTED)
+        mock_post.return_value = self._queued_answer(1)
         body = json.dumps({**self._email("template"), "recipients": self._recipients(1)})
 
         response = self.psak.post(BATCH_URL, body, content_type="application/json; charset=base64_codec")
@@ -567,17 +568,17 @@ class TestTransactionalEmailBatch(APIBaseTest):
     ):
         refusal: dict[str, Any] = {"error": pipeline_code}
         if answers_id:
-            refusal["invocation_id"] = SECOND_MESSAGE_ID
-        mock_post.return_value = _batch_answer(ACCEPTED, {"status": pipeline_status, "body": refusal})
+            refusal["invocation_id"] = self._id("key-1")
+        mock_post.return_value = _batch_answer(
+            _accepted(self._id("key-0")), {"status": pipeline_status, "body": refusal}
+        )
 
         response = self._batch("template", self._recipients(2))
 
         assert response.status_code == status.HTTP_200_OK, response.json()
         queued, refused = response.json()["results"]
-        assert queued == {"message_id": MESSAGE_ID, "status": "queued", "replayed": False}
-        assert refused["message_id"] == (
-            SECOND_MESSAGE_ID if answers_id else str(keyed_message_id(self.team.id, "key-1"))
-        )
+        assert queued == {"message_id": self._id("key-0"), "status": "queued", "replayed": False}
+        assert refused["message_id"] == self._id("key-1")
         assert {name: refused["error"][name] for name in ("code", "status", "retryable")} == {
             "code": public_code,
             "status": public_status,
@@ -594,72 +595,61 @@ class TestTransactionalEmailBatch(APIBaseTest):
             ("a_missed_deadline", {"return_value": _response(503, {"error": "deadline_exceeded"})}),
             ("an_unknown_refusal", {"return_value": _response(503, {"error": "some_new_refusal"})}),
             ("timeout", {"side_effect": requests.ReadTimeout()}),
-            ("an_answer_missing", {"return_value": _batch_answer(ACCEPTED)}),
-            ("an_answer_without_a_status", {"return_value": _batch_answer(ACCEPTED, {"body": {}})}),
-            (
-                "an_answer_with_an_empty_invocation_id",
-                {
-                    "return_value": _batch_answer(
-                        ACCEPTED, {"status": 202, "body": {"invocation_id": "", "replayed": False}}
-                    )
-                },
-            ),
+            ("an_answer_missing", lambda ids: [_accepted(ids[0])]),
+            ("an_answer_without_a_status", lambda ids: [_accepted(ids[0]), {"body": {}}]),
+            ("an_answer_with_an_empty_invocation_id", lambda ids: [_accepted(ids[0]), _accepted("")]),
             (
                 "an_answer_with_an_invocation_id_that_is_not_a_uuid",
-                {
-                    "return_value": _batch_answer(
-                        ACCEPTED, {"status": 202, "body": {"invocation_id": "not-a-uuid", "replayed": False}}
-                    )
-                },
+                lambda ids: [_accepted(ids[0]), _accepted("not-a-uuid")],
             ),
             (
                 "an_answer_without_a_replay_marker",
-                {
-                    "return_value": _batch_answer(
-                        ACCEPTED, {"status": 202, "body": {"invocation_id": SECOND_MESSAGE_ID}}
-                    )
-                },
+                lambda ids: [_accepted(ids[0]), {"status": 202, "body": {"invocation_id": ids[1]}}],
             ),
             (
                 "an_answer_with_an_invocation_id_that_is_not_valid_unicode",
-                {
-                    "return_value": _batch_answer(
-                        ACCEPTED, {"status": 202, "body": {"invocation_id": "\ud800", "replayed": False}}
-                    )
-                },
+                lambda ids: [_accepted(ids[0]), _accepted("\ud800")],
             ),
             (
                 "an_answer_with_a_replay_marker_that_is_not_a_bool",
-                {
-                    "return_value": _batch_answer(
-                        ACCEPTED, {"status": 202, "body": {"invocation_id": SECOND_MESSAGE_ID, "replayed": "no"}}
-                    )
-                },
+                lambda ids: [_accepted(ids[0]), _accepted(ids[1], replayed="no")],
             ),
             (
                 "an_answer_that_is_queued_and_refused",
-                {
-                    "return_value": _batch_answer(
-                        ACCEPTED,
-                        {
-                            "status": 202,
-                            "body": {
-                                "invocation_id": SECOND_MESSAGE_ID,
-                                "replayed": False,
-                                "error": "recipient_suppressed",
-                            },
-                        },
-                    )
-                },
+                lambda ids: [_accepted(ids[0]), _accepted(ids[1], error="recipient_suppressed")],
             ),
             (
                 "a_refusal_with_an_invocation_id_that_is_not_a_uuid",
-                {
-                    "return_value": _batch_answer(
-                        ACCEPTED, {"status": 422, "body": {"error": "idempotency_key_reused", "invocation_id": "x"}}
-                    )
-                },
+                lambda ids: [
+                    _accepted(ids[0]),
+                    {"status": 422, "body": {"error": "idempotency_key_reused", "invocation_id": "x"}},
+                ],
             ),
+            ("an_answer_with_the_ids_of_its_recipients_swapped", lambda ids: [_accepted(ids[1]), _accepted(ids[0])]),
+            ("an_answer_that_repeats_one_recipients_id", lambda ids: [_accepted(ids[0]), _accepted(ids[0])]),
+            (
+                "a_refusal_with_another_recipients_id",
+                lambda ids: [
+                    _accepted(ids[0]),
+                    {"status": 422, "body": {"error": "idempotency_key_reused", "invocation_id": ids[0]}},
+                ],
+            ),
+            (
+                "a_400_without_an_error",
+                lambda ids: [_accepted(ids[0]), {"status": 400, "body": {"invocation_id": ids[1]}}],
+            ),
+            (
+                "a_400_with_an_empty_error",
+                lambda ids: [_accepted(ids[0]), {"status": 400, "body": {"error": "", "invocation_id": ids[1]}}],
+            ),
+            (
+                "a_400_whose_error_is_not_a_string",
+                lambda ids: [
+                    _accepted(ids[0]),
+                    {"status": 400, "body": {"error": {"issues": []}, "invocation_id": ids[1]}},
+                ],
+            ),
+            ("a_400_with_an_empty_body", lambda ids: [_accepted(ids[0]), {"status": 400, "body": {}}]),
             ("a_whole_call_refusal_as_a_server_error", {"return_value": _response(503, {"error": "quota_limited"})}),
             (
                 "a_recipient_refusal_for_the_whole_call",
@@ -668,7 +658,7 @@ class TestTransactionalEmailBatch(APIBaseTest):
             ("a_missing_team", {"return_value": _response(404, {"error": "Team not found"})}),
             (
                 "an_answer_with_a_success_status_and_a_refusal",
-                {"return_value": _batch_answer(ACCEPTED, {"status": 200, "body": {"error": "recipient_suppressed"}})},
+                lambda ids: [_accepted(ids[0]), {"status": 200, "body": {"error": "recipient_suppressed"}}],
             ),
             (
                 "a_body_that_is_not_json",
@@ -679,7 +669,10 @@ class TestTransactionalEmailBatch(APIBaseTest):
     def test_a_batch_the_pipeline_does_not_answer_in_full_is_unavailable(
         self, mock_post, _flag, capture, _name, answer
     ):
-        mock_post.configure_mock(**answer)
+        if callable(answer):
+            mock_post.return_value = _batch_answer(*answer([self._id("key-0"), self._id("key-1")]))
+        else:
+            mock_post.configure_mock(**answer)
 
         response = self._batch("code")
 
@@ -702,7 +695,7 @@ class TestTransactionalEmailBatch(APIBaseTest):
     @patch("posthog.rate_limit.team_is_allowed_to_bypass_throttle", return_value=False)
     @patch("posthog.rate_limit.is_rate_limit_enabled", return_value=True)
     def test_the_rate_limit_is_reserved_before_the_key_is_created(self, _enabled, _bypass, mock_post, _flag, _capture):
-        mock_post.return_value = _batch_answer(*[ACCEPTED] * 5)
+        mock_post.return_value = self._queued_answer(5)
 
         with patch.object(TransactionalEmailTeamBurstThrottle, "rate", "4/minute"):
             response = self._batch("code", self._recipients(5))
@@ -727,7 +720,7 @@ class TestTransactionalEmailBatch(APIBaseTest):
             patch("posthog.rate_limit.is_rate_limit_enabled", return_value=True),
             patch.object(throttle, "rate", "5/minute"),
         ):
-            mock_post.return_value = _batch_answer(*[ACCEPTED] * 3)
+            mock_post.return_value = self._queued_answer(3)
             spent = self._batch("template", self._recipients(3))
             refused = self._batch("template", self._recipients(3))
             mock_post.return_value = MagicMock(status_code=202, json=lambda: {"invocation_id": "single"})
@@ -752,12 +745,14 @@ class TestTransactionalEmailBatch(APIBaseTest):
     ):
         Integration.objects.filter(id=self.sender.id).delete()
         TeamWorkflowsConfig.objects.filter(team_id=self.team.id).update(default_email_integration_id=None)
-        sandbox_send = {"invocation_id": MESSAGE_ID, "replayed": False, "sender_kind": "email_sandbox"}
+        sandbox_send = {"invocation_id": self._id("key-0"), "replayed": False, "sender_kind": "email_sandbox"}
         mock_post.return_value = MagicMock(status_code=202, json=lambda: sandbox_send)
         single = self._single("code", **sender)
         single_send = _forwarded(mock_post.call_args)["send"] if mock_post.called else None
         mock_post.reset_mock()
-        mock_post.return_value = _batch_answer(*[{"status": 202, "body": sandbox_send}] * 2)
+        mock_post.return_value = _batch_answer(
+            *(_accepted(self._id(key), sender_kind="email_sandbox") for key in ("key-0", "key-1"))
+        )
 
         batch = self._batch("code", **sender)
 
@@ -783,11 +778,8 @@ class TestTransactionalEmailBatch(APIBaseTest):
         self, mock_post, _flag, _capture, _name, form, queued_sender_kind, replayed_sender_kind, warns
     ):
         mock_post.return_value = _batch_answer(
-            {"status": 202, "body": {**ACCEPTED["body"], **_sent_by(queued_sender_kind)}},
-            {
-                "status": 202,
-                "body": {"invocation_id": SECOND_MESSAGE_ID, "replayed": True, **_sent_by(replayed_sender_kind)},
-            },
+            _accepted(self._id("key-0"), **_sent_by(queued_sender_kind)),
+            _accepted(self._id("key-1"), replayed=True, **_sent_by(replayed_sender_kind)),
             {"status": 422, "body": {"error": "sandbox_recipient_not_member"}},
         )
 

@@ -1064,7 +1064,7 @@ def _read_batch_answer(
         if not isinstance(status_code, int) or isinstance(status_code, bool) or not isinstance(body, dict):
             return None
         invocation_id = body.get("invocation_id")
-        if invocation_id is not None and not _is_message_id(invocation_id):
+        if invocation_id is not None and not _is_recipients_message_id(team_id, recipient, invocation_id):
             return None
         refusal_code = _refusal_code(body)
         if status_code == 202:
@@ -1090,6 +1090,8 @@ def _read_batch_answer(
                 "The email is larger than PostHog can send. Make its content or data smaller, and link to large "
                 "images and files instead of embedding them."
             )
+        elif status_code == 400 and not refusal_code:
+            return None
         elif status_code == 400 and refusal_code == "invalid_request":
             error = _pipeline_refusal(refusal_code, setup_url)
         elif status_code == 400:
@@ -1123,14 +1125,14 @@ def _pipeline_refusal(code: str, setup_url: Callable[[], str]) -> TransactionalE
     return error_class(message.format(setup_url=setup_url()) if "{setup_url}" in message else message)
 
 
-def _is_message_id(value: Any) -> bool:
+def _is_recipients_message_id(team_id: int, recipient: BatchRecipient, value: Any) -> bool:
     if not isinstance(value, str):
         return False
     try:
-        UUID(value)
+        message_id = UUID(value)
     except ValueError:
         return False
-    return True
+    return message_id == keyed_message_id(team_id, recipient.idempotency_key)
 
 
 def _attachment_refusal(refusal_code: str | None, answer: dict[str, Any]) -> TransactionalEmailError | None:
