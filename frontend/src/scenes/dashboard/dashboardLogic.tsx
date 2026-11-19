@@ -276,6 +276,8 @@ function reportDashboardTileRefreshed(
         insight_id: insight?.id,
         insight_short_id: insight?.short_id,
         was_cached: servedFromCache,
+        // Auto-refresh ticks against loads and refreshes a person started
+        is_automatic: isAutomatic,
         // Mostly true, since a load only refreshes tiles whose cached result is stale
         was_cached_before_refresh: tile.is_cached,
         last_refreshed: insight?.last_refresh?.toString(),
@@ -6350,7 +6352,9 @@ export const dashboardLogic = kea<dashboardLogicType>([
                                         queueWaitMs: 0,
                                         requestMs: Math.floor(performance.now() - startedAt),
                                         dashboardV2Ui: values.dashboardV2Enabled,
-                                    }
+                                    },
+                                    undefined,
+                                    !!isAutomatic
                                 )
                                 settleTile(tile, refreshedInsight.is_cached ? 'cached' : 'refreshed')
                             }
