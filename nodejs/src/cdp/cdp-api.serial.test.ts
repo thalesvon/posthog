@@ -5911,11 +5911,13 @@ describe('CDP API', () => {
                         }
                         const stalled = recipient('ada@example.com')
 
-                        const started = Date.now()
-                        const { result: res, blockedQueries } = await whileLocked(databaseUrl(), table, () =>
-                            sendBatchTo(own, TEMPLATE, batchOf(stalled))
-                        )
-                        const answeredAfterMs = Date.now() - started
+                        let answeredAfterMs = 0
+                        const { result: res, blockedQueries } = await whileLocked(databaseUrl(), table, async () => {
+                            const started = Date.now()
+                            const answer = await sendBatchTo(own, TEMPLATE, batchOf(stalled))
+                            answeredAfterMs = Date.now() - started
+                            return answer
+                        })
 
                         expect([res.status, res.body]).toEqual([503, { error: 'deadline_exceeded' }])
                         expect(blockedQueries).toBeGreaterThan(0)

@@ -614,7 +614,8 @@ export class TransactionalSends {
             ),
             deadline
         )
-        if (checks === 'deadline_exceeded') {
+        // A stalled event loop can run a finished lookup before the deadline's abort timer, so read the clock as well.
+        if (checks === 'deadline_exceeded' || deadlineError(deadline) !== undefined) {
             return { refused: 'deadline_exceeded' }
         }
         if (checks.refusal) {
@@ -642,7 +643,6 @@ export class TransactionalSends {
             ),
             deadline
         )
-        // A stalled event loop can run a finished lookup before the deadline's abort timer, so read the clock as well.
         if (recalled === 'deadline_exceeded' || deadlineError(deadline) !== undefined) {
             return { refused: 'deadline_exceeded' }
         }
