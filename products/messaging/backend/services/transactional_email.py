@@ -657,7 +657,14 @@ def send_code_email(
 def check_email_batch(
     recipients: Sequence[BatchRecipient], *, message_data: dict[str, Any] | None = None, email: CodeEmail | None = None
 ) -> tuple[BatchRecipient, ...]:
-    if not _within_batch_shared_limit(message_data if email is None else email):
+    try:
+        within_limit = _within_batch_shared_limit(message_data if email is None else email)
+    except UnicodeEncodeError:
+        raise InvalidRequest(
+            "The content or `message_data` that a batch sends to every recipient holds text that isn't valid "
+            "Unicode, such as a lone surrogate. Fix the text, then send the batch again."
+        ) from None
+    if not within_limit:
         raise ContentTooLarge(
             f"The content or `message_data` that a batch sends to every recipient can be at most "
             f"{BATCH_SHARED_MAX_BYTES // 1024} KiB. Send larger emails one at a time."
@@ -678,6 +685,9 @@ def send_email_batch(
 
 
 def send_code_email_batch(team: Team, email: CodeEmail, recipients: Sequence[BatchRecipient]) -> EmailBatchSent:
+    refusals = tuple(recipient.refusal for recipient in recipients if recipient.refusal is not None)
+    if len(refusals) == len(recipients):
+        return EmailBatchSent(results=refusals)
     with transactional_email_stage("workflow_lookup"):
         accepted_send, sandbox_warning = _accepted_send(team, email)
         hog_flow_id = _code_email_workflow_id(team.id, email.key, email.sensitive, require_active=False)
@@ -710,6 +720,16 @@ def _checked_recipient(recipient: BatchRecipient) -> BatchRecipient:
         _check_send_request(recipient.to, recipient.idempotency_key)
     except InvalidRecipient as e:
         return dataclasses.replace(recipient, refusal=e)
+    try:
+        _encoded_size(_batch_recipient_payload(recipient))
+    except UnicodeEncodeError:
+        return dataclasses.replace(
+            recipient,
+            refusal=InvalidRecipient(
+                "This recipient's `distinct_id` or `message_data` holds text that isn't valid Unicode, such as a "
+                "lone surrogate. Fix the text, then send it again."
+            ),
+        )
     return recipient
 
 
@@ -986,7 +1006,9 @@ def _batch_answer_list(answer: dict[str, Any], expected: int) -> list[tuple[int,
         status_code, body = (result.get("status"), result.get("body")) if isinstance(result, dict) else (None, None)
         if not isinstance(status_code, int) or isinstance(status_code, bool) or not isinstance(body, dict):
             return None
-        if status_code == 202 and not isinstance(body.get("invocation_id"), str):
+        if status_code == 202 and not (isinstance(body.get("invocation_id"), str) and body["invocation_id"]):
+            return None
+        if not isinstance(body.get("replayed", False), bool):
             return None
         answers.append((status_code, body))
     return answers

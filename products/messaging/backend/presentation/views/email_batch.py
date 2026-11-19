@@ -34,6 +34,7 @@ BATCH_MAX_RECIPIENTS = 100
 BATCH_BODY_MAX_BYTES = 5 * 1024 * 1024
 BATCH_REFUSED_FIELDS = ("scheduled_at", *CODE_SEND_EXTRA_FIELDS)
 FIELDS_THAT_FAIL_ONE_RECIPIENT = frozenset({"to", "distinct_id"})
+RECIPIENT_FIELDS = frozenset({"to", "distinct_id", "message_data", "idempotency_key"})
 RETRYABLE_CODES = frozenset({"idempotency_key_in_flight", "quota_limited", "delivery_unavailable", "not_attempted"})
 UNCONFIRMED_EMAIL = (
     "The email pipeline did not confirm this email, so it may still go out. To retry, send it again within 24 hours "
@@ -97,7 +98,7 @@ class EmailBatchRecipientsField(LengthFirstListField):
                 field, messages = next(iter(serializer.errors.items()))
                 recipient = BatchRecipient(
                     to=str(item.get("to", "")),
-                    idempotency_key=item["idempotency_key"],
+                    idempotency_key=str(item["idempotency_key"]),
                     refusal=InvalidRecipient(f"`{field}`: {messages[0]}"),
                 )
             else:
@@ -200,6 +201,14 @@ def refused_batch_field(data: Any, *, takes_template_key: bool) -> ExplainedRefu
         return None
     if field := next((field for field in BATCH_REFUSED_FIELDS if field in data), None):
         return _field_refusal(field)
+    if field := next((field for field in FIELDS_THAT_FAIL_ONE_RECIPIENT if field in data), None):
+        return ExplainedRefusal(
+            f"A batch send names each recipient in `recipients`, so it doesn't take `{field}` outside them.",
+            code="field_not_accepted",
+            attr=field,
+            why="Each recipient of a batch gets its own email, addressed by its own entry in `recipients`.",
+            fix=f"Move `{field}` into each entry of `recipients`.",
+        )
     recipients = data.get("recipients")
     if not isinstance(recipients, list) or len(recipients) > BATCH_MAX_RECIPIENTS:
         return None
@@ -208,6 +217,14 @@ def refused_batch_field(data: Any, *, takes_template_key: bool) -> ExplainedRefu
             continue
         if field := next((field for field in BATCH_REFUSED_FIELDS if field in recipient), None):
             return _field_refusal(f"recipients__{index}__{field}")
+        if field := next((field for field in recipient if field not in RECIPIENT_FIELDS), None):
+            return ExplainedRefusal(
+                f"A batch recipient doesn't take `{field}`, so PostHog didn't send the batch.",
+                code="field_not_accepted",
+                attr=f"recipients__{index}__{field}",
+                why="A recipient takes only `to`, `distinct_id`, `message_data` and `idempotency_key`.",
+                fix=f"Remove `{field}` from the recipient, or send this email on its own.",
+            )
         if takes_template_key and "message_data" in recipient:
             return ExplainedRefusal(
                 "A batch with `template_key` sends the same content to every recipient, so a recipient can't carry "

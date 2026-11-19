@@ -22,7 +22,6 @@ from posthog.plugins.plugin_server_api import WORKFLOWS_TRANSACTIONAL_EMAIL_JWT_
 
 from products.messaging.backend.models.message_template import MessageTemplate
 from products.messaging.backend.models.transactional_email_key import TransactionalEmailKey
-from products.messaging.backend.presentation.views.email_batch import SendEmailBatchSerializer
 from products.messaging.backend.presentation.views.message_templates import (
     EMAIL_BATCH_FLAG,
     EMAIL_FROM_CODE_FLAG,
@@ -138,7 +137,7 @@ class TestTransactionalEmailBatch(APIBaseTest):
 
     def _batch(self, form: str = "template", recipients: list[dict[str, Any]] | None = None, /, **fields: Any) -> Any:
         body = {**self._email(form), "recipients": recipients or self._recipients(2), **fields}
-        return self.psak.post(BATCH_URL, body, format="json")
+        return self.psak.post(BATCH_URL, json.dumps(body), content_type="application/json")
 
     def _single(self, form: str = "template", **fields: Any) -> Any:
         body = {**self._email(form), "to": "user0@example.com", **fields}
@@ -187,7 +186,9 @@ class TestTransactionalEmailBatch(APIBaseTest):
         }
         single_event, *batch_events = [call.kwargs["properties"] for call in capture.call_args_list]
         assert {"batch_size", "batch_id"}.isdisjoint(single_event)
-        assert [(event["batch_size"], event["outcome"]) for event in batch_events] == [(2, "queued")] * 2
+        assert [(event["batch_size"], event["outcome"], event["has_idempotency_key"]) for event in batch_events] == [
+            (2, "queued", True)
+        ] * 2
         assert batch_events[0]["batch_id"] == batch_events[1]["batch_id"]
 
     def test_each_forward_carries_a_token_for_its_own_route(self, mock_post, _flag, _capture):
@@ -224,12 +225,13 @@ class TestTransactionalEmailBatch(APIBaseTest):
             {"to": "{{person.email}}@example.com", "idempotency_key": "key-0"},
             {"to": "user1@example.com", "idempotency_key": "key-1"},
             {"to": "not an address", "idempotency_key": "key-2"},
+            {"to": "user3@example.com", "idempotency_key": "key-3", "message_data": {"name": "\ud800"}},
         ]
 
-        response = self._batch("code", recipients)
+        response = self._batch("template", recipients)
 
         assert response.status_code == status.HTTP_200_OK, response.json()
-        refused, queued, malformed = response.json()["results"]
+        refused, queued, malformed, unencodable = response.json()["results"]
         assert (refused["error"]["code"], refused["error"]["status"], refused["error"]["retryable"]) == (
             "invalid_recipient",
             400,
@@ -238,6 +240,7 @@ class TestTransactionalEmailBatch(APIBaseTest):
         assert "{ or }" in refused["error"]["detail"]
         assert queued == {"message_id": "invocation-1", "status": "queued", "replayed": False}
         assert malformed["error"]["code"] == "invalid_recipient"
+        assert unencodable["error"]["code"] == "invalid_recipient"
         assert [recipient["to"] for recipient in _forwarded(mock_post.call_args)["recipients"]] == ["user1@example.com"]
 
     @parameterized.expand(
@@ -279,6 +282,23 @@ class TestTransactionalEmailBatch(APIBaseTest):
                 "recipients",
             ),
             ("shared_scheduled_at", "code", {"scheduled_at": "2030-01-01T00:00:00Z"}, 400, "scheduled_at"),
+            ("shared_to", "template", {"to": "a@example.com"}, 400, "to"),
+            ("shared_distinct_id", "code", {"distinct_id": "person-1"}, 400, "distinct_id"),
+            (
+                "recipient_unknown_field",
+                "template",
+                {"recipients": [{**RECIPIENT, "identifiers": {"distinct_id": "person-1"}}]},
+                400,
+                "recipients__0__identifiers",
+            ),
+            (
+                "key_of_a_refused_address_repeated_as_text",
+                "template",
+                {"recipients": [{"to": "not an address", "idempotency_key": 7}, {**RECIPIENT, "idempotency_key": "7"}]},
+                400,
+                "recipients__1__idempotency_key",
+            ),
+            ("shared_data_with_a_lone_surrogate", "template", {"message_data": {"name": "\ud800"}}, 400, None),
             ("shared_attachments", "template", {"attachments": []}, 400, "attachments"),
             ("recipient_cc", "code", {"recipients": [{**RECIPIENT, "cc": []}]}, 400, "recipients__0__cc"),
             (
@@ -344,12 +364,6 @@ class TestTransactionalEmailBatch(APIBaseTest):
 
         assert response.status_code == status.HTTP_200_OK, response.json()
         assert [result["status"] for result in response.json()["results"]] == ["queued"] * count
-
-    def test_the_batch_request_schema_takes_no_field_a_batch_refuses(self, _mock_post, _flag, _capture):
-        request_fields = set(SendEmailBatchSerializer().fields)
-
-        assert request_fields.isdisjoint({"to", "distinct_id", "scheduled_at", "cc", "bcc", "attachments"})
-        assert "recipients" in request_fields
 
     def _form_encoded_batch(self) -> Any:
         return self.psak.post(
@@ -431,6 +445,18 @@ class TestTransactionalEmailBatch(APIBaseTest):
             ("timeout", {"side_effect": requests.ReadTimeout()}),
             ("an_answer_missing", {"return_value": _batch_answer(ACCEPTED)}),
             ("an_answer_without_a_status", {"return_value": _batch_answer(ACCEPTED, {"body": {}})}),
+            (
+                "an_answer_with_an_empty_invocation_id",
+                {"return_value": _batch_answer(ACCEPTED, {"status": 202, "body": {"invocation_id": ""}})},
+            ),
+            (
+                "an_answer_with_a_replay_marker_that_is_not_a_bool",
+                {
+                    "return_value": _batch_answer(
+                        ACCEPTED, {"status": 202, "body": {"invocation_id": "i-2", "replayed": "no"}}
+                    )
+                },
+            ),
             (
                 "a_body_that_is_not_json",
                 {"return_value": MagicMock(status_code=200, json=MagicMock(side_effect=ValueError))},
@@ -516,6 +542,32 @@ class TestTransactionalEmailBatch(APIBaseTest):
             assert _forwarded(mock_post.call_args)["send"] == single_send
         else:
             assert (batch.status_code, batch.json()) == (single.status_code, single.json())
+
+    def test_a_code_batch_with_no_recipient_it_can_address_creates_nothing(self, mock_post, _flag, _capture):
+        workflows = HogFlow.objects.filter(team=self.team).count()
+
+        response = self._batch("code", [{"to": "not an address", "idempotency_key": "key-0"}])
+
+        assert response.status_code == status.HTTP_200_OK, response.json()
+        assert [result["error"]["code"] for result in response.json()["results"]] == ["invalid_recipient"]
+        assert not TransactionalEmailKey.objects.for_team(self.team.id, canonical=True).exists()
+        assert HogFlow.objects.filter(team=self.team).count() == workflows
+        mock_post.assert_not_called()
+
+    @patch("posthog.rate_limit.team_is_allowed_to_bypass_throttle", return_value=False)
+    @patch("posthog.rate_limit.is_rate_limit_enabled", return_value=True)
+    def test_a_batch_while_its_flag_is_off_spends_no_send(self, _enabled, _bypass, mock_post, flag, _capture):
+        flag.side_effect = lambda key, *_args, **_kwargs: key != EMAIL_BATCH_FLAG
+        mock_post.return_value = MagicMock(status_code=202, json=lambda: {"invocation_id": "single"})
+
+        with patch.object(TransactionalEmailTeamBurstThrottle, "rate", "1/minute"):
+            hidden = self._batch("template")
+            single = self._single("template")
+            hidden_past_the_budget = self._batch("template")
+
+        assert hidden.status_code == status.HTTP_404_NOT_FOUND
+        assert single.status_code == status.HTTP_202_ACCEPTED, single.json()
+        assert hidden_past_the_budget.status_code == status.HTTP_404_NOT_FOUND
 
     @parameterized.expand(
         [

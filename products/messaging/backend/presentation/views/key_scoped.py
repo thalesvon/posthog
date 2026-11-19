@@ -60,6 +60,12 @@ class KeyScopedMessagingSendViewSet(MessagingSendViewSet):
     def body_too_large(self) -> ExplainedRefusal:
         return batch_body_too_large() if self.action == "email_batch" else super().body_too_large()
 
+    def check_throttles(self, request: Any) -> None:
+        if self.action == "email_batch":
+            with transactional_email_stage("feature_flag"):
+                require_email_batch_sends(self.team)
+        super().check_throttles(request)
+
     def refuse_body_over_the_cap(self) -> APIException:
         refusal = super().refuse_body_over_the_cap()
         if self.action == "email_batch" and isinstance(refusal, ExplainedRefusal):
@@ -88,9 +94,7 @@ class KeyScopedMessagingSendViewSet(MessagingSendViewSet):
     )
     def email_batch(self, request: Any, *args: Any, **kwargs: Any) -> Response:
         batch_id = str(uuid4())
-        self._batch_properties = {"batch_id": batch_id}
-        with transactional_email_stage("feature_flag"):
-            require_email_batch_sends(self.team)
+        self._batch_properties = {"batch_id": batch_id, "has_idempotency_key": None}
         if request.content_type.split(";")[0].strip().lower() != JSONParser.media_type:
             raise UnsupportedMediaType(request.content_type)
         if len(request.body) > BATCH_BODY_MAX_BYTES:
@@ -103,7 +107,11 @@ class KeyScopedMessagingSendViewSet(MessagingSendViewSet):
         serializer.is_valid(raise_exception=True)
         request.validated_data = data = serializer.validated_data
         self._end_request_validation()
-        self._batch_properties = {"batch_id": batch_id, "batch_size": len(data["recipients"])}
+        self._batch_properties = {
+            "batch_id": batch_id,
+            "batch_size": len(data["recipients"]),
+            "has_idempotency_key": True,
+        }
         email = code_email(data) if takes_template_key else None
         try:
             recipients = check_email_batch(data["recipients"], message_data=data["message_data"], email=email)
