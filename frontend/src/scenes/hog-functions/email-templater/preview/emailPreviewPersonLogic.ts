@@ -6,11 +6,17 @@ import api from 'lib/api'
 import { objectsEqual } from 'lib/utils/objects'
 
 import { ActorsQuery, NodeKind, ProductKey } from '~/queries/schema/schema-general'
-import { AnyPersonScopeFilter } from '~/types'
+import { AnyPersonScopeFilter, PropertyFilterType, PropertyOperator } from '~/types'
 
 import { EmailPreviewPerson } from './emailPreview'
 
 const PREVIEW_PERSON_LIMIT = 25
+const HAS_EMAIL: AnyPersonScopeFilter = {
+    key: 'email',
+    type: PropertyFilterType.Person,
+    operator: PropertyOperator.IsSet,
+    value: PropertyOperator.IsSet,
+}
 
 export interface PreviewPerson extends EmailPreviewPerson {
     displayName: string
@@ -155,7 +161,8 @@ export const emailPreviewPersonLogic = kea<emailPreviewPersonLogicType>([
                         // for anyone running locally.
                         tags: { productKey: ProductKey.WORKFLOWS },
                         // Audiences only offer person-scoped filters, which is all an actors query accepts.
-                        properties: values.audience,
+                        // Someone with no email address can't receive the email, so they make a poor preview.
+                        properties: [...values.audience, HAS_EMAIL],
                         select: ['id', 'person_display_name -- Person', 'properties'],
                         limit: PREVIEW_PERSON_LIMIT,
                     }
