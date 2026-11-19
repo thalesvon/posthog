@@ -13,6 +13,7 @@ import {
     type ResponseBodySource,
     toonResponseBody,
 } from '@/lib/response-budget'
+import { buildTimeSeriesChartData } from '@/lib/time-series-chart-data'
 import { isPrepareConfirmedActionResult } from '@/tools/confirmed-action-runtime'
 import { POSTHOG_FORMATTED_RESULTS_OVERRIDE_KEY, POSTHOG_META_KEY, POSTHOG_TEXT_PROJECTION_KEY } from '@/tools/types'
 import { APP_DATA_META_KEY, type AnalyticsMetadata, type WithAnalytics } from '@/ui-apps/types'
@@ -55,6 +56,7 @@ export interface BuildToolResultOptions {
      */
     includeUiResponseMeta?: boolean
     includeRenderNote?: boolean
+    appendTimeSeriesChartData?: boolean | undefined
 }
 
 /**
@@ -225,6 +227,7 @@ export function buildToolResultPayload(opts: BuildToolResultOptions): ToolResult
         mcpClientName,
         includeUiResponseMeta,
         includeRenderNote,
+        appendTimeSeriesChartData,
     } = opts
 
     const isStringResult = typeof handlerResult === 'string'
@@ -306,6 +309,11 @@ export function buildToolResultPayload(opts: BuildToolResultOptions): ToolResult
 
     const footers: string[] = []
     let nextPageHint: string | null = null
+
+    const chartData = appendTimeSeriesChartData && !useJson ? buildTimeSeriesChartData(handlerResult) : undefined
+    if (chartData) {
+        footers.push(chartData)
+    }
 
     if (!isStringResult && !useJson && !structuredContentOnly && !isPrepareConfirmedActionResult(handlerResult)) {
         nextPageHint = getNextPageHint(toolName, rawResult)

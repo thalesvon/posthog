@@ -7,6 +7,7 @@ import {
     type QueryToolInfo,
     type ToolInfo,
 } from '@/lib/instructions'
+import { metricCatalogPromptVars, resolveMetricCatalogMode } from '@/lib/metric-catalog'
 import { formatPrompt } from '@/lib/utils'
 import EXECUTE_SQL_REFERENCE from '@/templates/execute-sql-reference.md'
 import ACTIVITY_HISTORY_SQL from '@/templates/sections/activity-history-sql.md'
@@ -35,10 +36,13 @@ import EXEC_TOOL_BLURB from '@/templates/sections/exec-tool-blurb.md'
 import EXPLAIN_CHART from '@/templates/sections/explain-chart.md'
 import INBOX_FIRST from '@/templates/sections/inbox-first.md'
 import METRIC_DISCOVERY_COMPACT from '@/templates/sections/metric-discovery-compact.md'
+import METRIC_DISCOVERY_EMPTY_LEARN from '@/templates/sections/metric-discovery-empty-learn.md'
+import METRIC_DISCOVERY_EMPTY from '@/templates/sections/metric-discovery-empty.md'
 import METRIC_DISCOVERY from '@/templates/sections/metric-discovery.md'
 import NOTEBOOK_PYTHON from '@/templates/sections/notebook-python.md'
 import NOTEBOOK_RUN from '@/templates/sections/notebook-run.md'
 import NOTEBOOK_SQL from '@/templates/sections/notebook-sql.md'
+import PROJECT_SCOPE from '@/templates/sections/project-scope.md'
 import QUERY_TOOL_ROUTING from '@/templates/sections/query-tool-routing.md'
 import RETRIEVING_DATA from '@/templates/sections/retrieving-data.md'
 import SCHEMA_WORKFLOW from '@/templates/sections/schema-workflow.md'
@@ -46,9 +50,10 @@ import SKILLS_FIRST from '@/templates/sections/skills-first.md'
 import TOOL_SEARCH from '@/templates/sections/tool-search.md'
 import URL_PATTERNS from '@/templates/sections/url-patterns.md'
 import { type ExecLearnGuide, LEARN_COMMAND_LINE } from '@/tools/exec-learn'
-import type { BusinessKnowledgeContent } from '@/tools/types'
+import type { BusinessKnowledgeContent, MetricCatalogContent } from '@/tools/types'
 
 export const HOGQL_GUIDE_ID = 'hogql'
+export const HOGQL_TABLES_GUIDE_ID = 'hogql-tables'
 
 /** Naming a command the catalog withholds sends the agent down a path it cannot take. */
 const WHATS_NEW_WITH_DOCS_SEARCH =
@@ -89,16 +94,24 @@ export interface InstructionsContext {
     replayVisionEnabled?: boolean | undefined
     /** Moves SQL catalog guidance from `analytics` to a `sql` guide, so the guide loaded on most tasks does not steer typed-runner questions toward SQL. */
     cliLearnLayout?: boolean | undefined
+    /** Whether `endpoint-create` is advertised to this client. Same reason as `docsSearchEnabled`. */
+    endpointsEnabled?: boolean | undefined
     businessKnowledgeContent?: BusinessKnowledgeContent | undefined
     /** Set only when the experiment flag is on and the report list and retrieve tools are advertised. */
     inboxFirstEnabled?: boolean | undefined
     /** Read-only connections lack `inbox-reports-claim`, so they get no pull-request line. */
     inboxClaimEnabled?: boolean | undefined
+    metricCatalog?: MetricCatalogContent | undefined
+    learnToolEnabled?: boolean | undefined
 }
 
 const REPLAY_VISION_TOOLS = ['vision-scanners-inline-scan', 'vision-requests-create', 'vision-requests-get']
 const REPLAY_VISION =
     'To learn what happened inside session recordings (what users did, saw, or struggled with), use Replay Vision instead of SQL over the replay tables. Call `vision-scanners-inline-scan` with `session_ids` and a `prompt` for sessions you already have, or `vision-requests-create` for up to 200 sessions and read the result with `vision-requests-get`. SQL over `session_replay_events` returns recording metadata only, such as duration, URLs and event counts; use it to find candidate sessions.'
+
+const ENDPOINT_CREATE_TOOL = 'endpoint-create'
+const ENDPOINTS_ROUTING =
+    'When the user wants PostHog data in code, a script, a scheduled job, a backend, or a customer-facing feature, offer to save the query as an endpoint, even if they never say "endpoint". Create it with `endpoint-create` only after they agree, then give them its run URL. Do not write code that calls `/api/projects/:id/query/`, which is for one-off exploration. Use variables for values the caller changes, and materialization for heavy or frequent aggregates. Raw-data exports belong on batch exports.'
 
 const BUSINESS_KNOWLEDGE_SEARCH_TOOL = 'business-knowledge-documents-search'
 const BUSINESS_KNOWLEDGE_REPO_SEARCH_TOOL = 'business-knowledge-repositories-search'
@@ -149,6 +162,10 @@ function notebookSqlVars(ctx: InstructionsContext): Record<string, string> {
  *  build a context without it (the CLI's `--agent-help`). */
 function docsSearchAvailable(ctx: InstructionsContext): boolean {
     return ctx.docsSearchEnabled ?? ctx.tools?.some(({ name }) => name === 'docs-search') ?? false
+}
+
+function endpointsAvailable(ctx: InstructionsContext): boolean {
+    return ctx.endpointsEnabled ?? ctx.tools?.some(({ name }) => name === ENDPOINT_CREATE_TOOL) ?? false
 }
 
 function replayVisionAvailable(ctx: InstructionsContext): boolean {
@@ -218,6 +235,21 @@ function envContextSections(ctx: InstructionsContext): string[] {
  * modes live in a single file, so prose can't drift.
  */
 export class InstructionsFormatter {
+    buildMetricDiscovery(ctx: InstructionsContext): string {
+        return this.compose(this.metricDiscoverySections(ctx, METRIC_DISCOVERY), ctx, { compact: false })
+    }
+
+    private metricDiscoverySections(
+        ctx: InstructionsContext,
+        rule: string,
+        opts: { learnAnalytics?: boolean } = {}
+    ): string[] {
+        if (resolveMetricCatalogMode(ctx.metricCatalog) !== 'empty') {
+            return [rule]
+        }
+        return opts.learnAnalytics ? [METRIC_DISCOVERY_EMPTY, METRIC_DISCOVERY_EMPTY_LEARN] : [METRIC_DISCOVERY_EMPTY]
+    }
+
     private knowledgeFirstSections(ctx: InstructionsContext): string[] {
         return this.knowledgeFirstSectionsForCapabilities({
             docsSearchEnabled: docsSearchAvailable(ctx),
@@ -280,13 +312,36 @@ export class InstructionsFormatter {
         ]
     }
 
+    buildLearnToolDescription(): string {
+        return this.skillsFirstSection(false)
+    }
+
+    private skillsFirstSection(execSyntax: boolean): string {
+        return formatPrompt(SKILLS_FIRST, {
+            learn_call: execSyntax
+                ? 'run `learn -s "<task keywords>"` here'
+                : 'call the `learn` tool with `learn -s "<task keywords>"`',
+            skill_store_note: execSyntax
+                ? ''
+                : ' Find and load skills with `learn`, not with `skill-list` or `skill-get`: those manage the skills your team stores and do not hold the built-in PostHog skills.',
+        })
+    }
+
     /** Artifact-choice guidance: notebook vs dashboard vs insight, plus the
      *  SQL-and-Python-go-in-cells rules when the notebook cell tools are available, and
      *  the refresh-a-notebook rule when the run tool is. */
     private artifactSections(ctx: InstructionsContext): string[] {
         return [
             ANALYSIS_ARTIFACTS,
-            ...(ctx.tools?.some(({ name }) => name === 'explain-chart') ? [EXPLAIN_CHART] : []),
+            ...(ctx.tools?.some(({ name }) => name === 'explain-chart')
+                ? [
+                      formatPrompt(EXPLAIN_CHART, {
+                          explain_chart_link_line: ctx.tools.some(({ name }) => name === 'explain-chart-save')
+                              ? 'Where the conversation cannot show the chart explanation, call `explain-chart-save` with the same arguments and give the person the link it returns, which opens it beside the chart in PostHog.'
+                              : '',
+                      }),
+                  ]
+                : []),
             ...(ctx.notebookCellsEnabled ? [formatPrompt(NOTEBOOK_SQL, notebookSqlVars(ctx)), NOTEBOOK_PYTHON] : []),
             ...(ctx.notebookRunEnabled ? [NOTEBOOK_RUN] : []),
         ]
@@ -306,11 +361,13 @@ export class InstructionsFormatter {
     buildToolsInstructions(ctx: InstructionsContext): string {
         return this.compose(
             [
+                PROJECT_SCOPE,
+                ...(ctx.learnToolEnabled ? [this.skillsFirstSection(false)] : []),
                 BASIC_FUNCTIONALITY,
                 ...this.knowledgeFirstSections(ctx),
                 ...this.inboxFirstSections(ctx, false),
                 TOOL_SEARCH,
-                METRIC_DISCOVERY,
+                ...this.metricDiscoverySections(ctx, METRIC_DISCOVERY),
                 RETRIEVING_DATA,
                 SCHEMA_WORKFLOW,
                 CATALOG_TRUST_DISCOVERY,
@@ -355,7 +412,7 @@ export class InstructionsFormatter {
 
     /** Build the top-level description of the `posthog:exec` tool. Lives in the
      *  uncapped top-level `description`, so the skills text costs no schema budget.
-     *  The skills mandate LEADS the description: it is the only signal that reaches
+     *  Project clarification and the skills mandate lead the description to reach
      *  an agent before its first tool call, and agents that answer PostHog-behavior
      *  questions by cloning the public repo never make a call for the gate to catch. */
     buildExecToolDescription(
@@ -370,7 +427,8 @@ export class InstructionsFormatter {
         const knowledgeSections = this.knowledgeFirstSectionsForCapabilities({ ...opts, execSyntax: true })
         const hasMandate = opts.skillsEnabled || knowledgeSections.length > 0
         return [
-            ...(opts.skillsEnabled ? [SKILLS_FIRST] : []),
+            PROJECT_SCOPE,
+            ...(opts.skillsEnabled ? [this.skillsFirstSection(true)] : []),
             ...knowledgeSections,
             hasMandate ? EXEC_TOOL_BLURB_COMPACT : EXEC_TOOL_BLURB,
         ]
@@ -390,7 +448,7 @@ export class InstructionsFormatter {
                     : 'Query or analyze data: governed metrics, typed runners over SQL, schema checks, certified tables, verified joins.',
                 content: this.compose(
                     [
-                        METRIC_DISCOVERY,
+                        ...this.metricDiscoverySections(ctx, METRIC_DISCOVERY),
                         RETRIEVING_DATA,
                         SCHEMA_WORKFLOW,
                         ...(ctx.cliLearnLayout ? [] : [CATALOG_TRUST_DISCOVERY]),
@@ -439,12 +497,20 @@ export class InstructionsFormatter {
 
         // The compact `execute-sql` description points here, so this guide must keep the
         // complete guidelines and every section that description leaves out.
-        entries.push({
-            id: HOGQL_GUIDE_ID,
-            title: 'HogQL reference',
-            description: 'Full HogQL guidelines, examples, and the observability and LLM tables for `execute-sql`.',
-            content: `${ctx.guidelines.trim()}\n\n${EXECUTE_SQL_REFERENCE.trim()}`,
-        })
+        entries.push(
+            {
+                id: HOGQL_GUIDE_ID,
+                title: 'HogQL guidelines',
+                description: 'Syntax and query guidelines for `execute-sql`.',
+                content: `${ctx.guidelines.trim()}\n\nRun \`learn ${HOGQL_TABLES_GUIDE_ID}\` for examples and the observability and LLM tables.`,
+            },
+            {
+                id: HOGQL_TABLES_GUIDE_ID,
+                title: 'HogQL tables and examples',
+                description: 'Examples and table details for observability and LLM queries.',
+                content: EXECUTE_SQL_REFERENCE.trim(),
+            }
+        )
 
         if (ctx.renderUiEnabled) {
             entries.push({
@@ -500,13 +566,13 @@ export class InstructionsFormatter {
                   help_topics: learnGuideList,
               })
             : undefined
-        const renderCtx: InstructionsContext = claudeChat
-            ? { guidelines: ctx.guidelines, tools: ctx.tools }
-            : {
-                  guidelines: ctx.guidelines,
-                  docsSearchEnabled: docsSearchAvailable(ctx),
-                  cliLearnLayout: ctx.cliLearnLayout,
-              }
+        const renderCtx: InstructionsContext = {
+            guidelines: ctx.guidelines,
+            tools: claudeChat ? ctx.tools : undefined,
+            docsSearchEnabled: docsSearchAvailable(ctx),
+            cliLearnLayout: !claudeChat && ctx.cliLearnLayout,
+            metricCatalog: ctx.metricCatalog,
+        }
 
         return this.compose(
             [
@@ -515,7 +581,7 @@ export class InstructionsFormatter {
                 ...(learnSection ? [learnSection] : []),
                 // claude.ai drops `exec` when its inputSchema passes the registry cap, and this section pushes the reference over it.
                 ...(claudeChat ? [] : this.inboxFirstSections(ctx, true)),
-                METRIC_DISCOVERY_COMPACT,
+                ...this.metricDiscoverySections(ctx, METRIC_DISCOVERY_COMPACT, { learnAnalytics: !!learnSection }),
                 ...(ctx.cliLearnLayout ? [QUERY_TOOL_ROUTING] : []),
                 CLI_SCHEMA_DRILLDOWN,
                 CLI_DATA_DISCOVERY,
@@ -544,7 +610,7 @@ export class InstructionsFormatter {
         const sections = [
             CLI_SYNTAX,
             ...this.inboxFirstSections(ctx, true),
-            METRIC_DISCOVERY,
+            ...this.metricDiscoverySections(ctx, METRIC_DISCOVERY),
             CLI_SCHEMA_DRILLDOWN,
             CLI_DATA_DISCOVERY,
             CLI_EXAMPLES,
@@ -567,6 +633,7 @@ export class InstructionsFormatter {
             tools: undefined,
             docsSearchEnabled: docsSearchAvailable(ctx),
             replayVisionEnabled: replayVisionAvailable(ctx),
+            endpointsEnabled: endpointsAvailable(ctx),
         }
         // Tool domains are temporarily omitted from the command reference while we
         // probe claude.ai's per-tool size cap (it silently drops oversized entries);
@@ -593,6 +660,7 @@ export class InstructionsFormatter {
         // `{query_tools}` only appears in non-compact sections (the exec command
         // reference and tools-mode instructions); compact mode surfaces queries
         // via the single `query` tool domain instead.
+        const metricVars = metricCatalogPromptVars(resolveMetricCatalogMode(ctx.metricCatalog))
         const vars = {
             guidelines: ctx.guidelines.trim(),
             available_tools: buildAvailableToolsBlock(ctx.renderUiEnabled),
@@ -600,12 +668,14 @@ export class InstructionsFormatter {
             query_tools: ctx.queryTools ? buildQueryToolsBlock(ctx.queryTools) : '',
             entity_schema_discovery: ctx.cliLearnLayout ? '' : ENTITY_SCHEMA_DISCOVERY.trim(),
             replay_vision: replayVisionAvailable(ctx) ? REPLAY_VISION : '',
-            query_tool_routing: ctx.cliLearnLayout ? '' : QUERY_TOOL_ROUTING.trim(),
+            query_tool_routing: ctx.cliLearnLayout ? '' : formatPrompt(QUERY_TOOL_ROUTING, metricVars),
             sql_trust_pointer: ctx.cliLearnLayout
                 ? '`info execute-sql` and `learn sql` cover certified tables/views and verified joins'
                 : 'Run `learn analytics` before writing SQL or joins — it covers certified tables/views and verified joins',
+            endpoints_routing: endpointsAvailable(ctx) ? ENDPOINTS_ROUTING : '',
             extra_commands: opts.extraCommands ?? '',
             whats_new_check: docsSearchAvailable(ctx) ? WHATS_NEW_WITH_DOCS_SEARCH : WHATS_NEW_CHANGELOG_ONLY,
+            ...metricVars,
         }
         const body = sections
             .map((s) => s.trim())

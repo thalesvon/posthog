@@ -6,9 +6,7 @@
 User: How many weekly active users do we have?
 {skill_step}Assistant: {analytics_learn_intro}
 [Runs `posthog:exec({"command":"learn {analytics_learn_topics}"})`]
-Assistant: A weekly count is a governed shape, so the catalog comes first.
-[Runs `posthog:exec({"command":"call metric-list {\"limit\":100}"})`]
-Assistant: No approved metric matches, so I fall through to the query tools.
+{metric_example_steps}
 [Runs `posthog:exec({"command":"search query-trends"})` and `posthog:exec({"command":"search read-data"})` in parallel]
 Assistant: I'll inspect both schemas.
 [Runs `posthog:exec({"command":"info query-trends"})` and `posthog:exec({"command":"info read-data-schema"})` in parallel]

@@ -8,6 +8,7 @@ import { z } from 'zod'
 
 import { PostHogMCP } from '@posthog/mcp-analytics'
 
+import { compactPropertyFilterSchema } from '@/hono/property-filter-schema'
 import { dedupeRepeatedDescriptions, toMcpInputSchema } from '@/hono/tool-catalog'
 import { CLAUDE_REGISTRY_INPUT_SCHEMA_CHAR_LIMIT, OAUTH_SCOPES_HIDDEN } from '@/lib/constants'
 import { SessionManager } from '@/lib/SessionManager'
@@ -92,20 +93,24 @@ async function loadSnapshotTools(): Promise<Tool<ZodObjectAny>[]> {
     // visual-review, etc.) stay off to keep the surface stable.
     // agent-feedback is always_available and no longer flag-gated, so it appears regardless.
     const featureFlags = {
+        'workflows-resend-import': true,
         'self-driving-usage-display': true,
+        'today-rail-nav': true,
         tracing: true,
-        'logs-agent-tools': true,
         tasks: true,
         'tasks-mcp-agent-run-start': true,
         loops: true,
         'agent-platform': true,
         'experiment-setup-context': true,
         'scout-trials': true,
+        'scout-scratchpad-discard-mcp': true,
         'signals-report-monitoring': true,
         'inbox-report-actions-mcp': true,
         'inbox-reports-create-mcp': true,
+        'workflows-bulk-suppressions-mcp': true,
         'signals-reviewer-exclusions-mcp': true,
         'ai-observability-offline-evaluations': true,
+        'ai-observability-composite-validation': true,
         'workflows-supabase-auth-emails': true,
         'warehouse-suggestions': true,
         'workflows-destination-suggestion': true,
@@ -113,19 +118,27 @@ async function loadSnapshotTools(): Promise<Tool<ZodObjectAny>[]> {
         'subscription-source-summaries': true,
         'marketing-analytics-conversion-setup-ai': true,
         'marketing-analytics-recommendations': true,
-        'workflows-mcp-onboarding': true,
         'workflows-sending-tier-requests': true,
         'insight-data-checks': true,
         'workflows-transactional-email-api': true,
         'workflows-email-from-code': true,
         'activity-summary': true,
+        'warehouse-migration-import': true,
         'activity-summary-search': true,
+        'inbox-reports-search': true,
         'personal-inbox-ranking': true,
         'aeo-citation-tracking': true,
         'mcp-session-recording-console-logs': true,
         'anomalies-search': true,
         'warehouse-multi-destination': true,
+        'dwh-custom-source-ai-builder': true,
         'feature-flag-rules-v2-mcp': true,
+        'discussions-slack-sync': true,
+        'ui-customization': true,
+        'platform-alerts-source-warehouse': true,
+        'logs-agent-tools': true,
+        'signals-source-filters': true,
+        'releases-area': true,
     }
     return [...(await getToolsFromContext(createMockContext(), { featureFlags }))].sort((a, b) =>
         a.name.localeCompare(b.name)
@@ -172,7 +185,7 @@ describe('Tool schema snapshots', () => {
 
     describe('schema budgets', () => {
         // Ratchet: the number of oversized tool schemas may only go down.
-        const OVERSIZED_SCHEMA_COUNT = 39
+        const OVERSIZED_SCHEMA_COUNT = 38
         // Ratchet: the share of nested properties with a description may only go up.
         const NESTED_DESCRIPTION_COVERAGE_FLOOR_PERCENT = 55
         const TOOL_SCHEMA_CHAR_BUDGET = 40_000
@@ -185,8 +198,6 @@ describe('Tool schema snapshots', () => {
             'query-trends': 63_000,
             'query-funnel-actors': 54_000,
             'query-funnel': 51_000,
-            'query-retention-actors': 47_000,
-            'query-retention': 46_000,
         }
         // About 1% over the measured total, so help_text edits pass and new tools need a reviewed raise.
         const TOOLS_MODE_ROSTER_CHAR_BUDGET = 3_965_000
@@ -243,7 +254,7 @@ describe('Tool schema snapshots', () => {
                     tools.map((tool) => ({
                         name: tool.name,
                         description: tool.description,
-                        inputSchema: toMcpInputSchema(tool.schema),
+                        inputSchema: compactPropertyFilterSchema(toMcpInputSchema(tool.schema)),
                     }))
                 )
                 .map((entry) => ({ name: entry.name, size: JSON.stringify(entry.inputSchema).length }))

@@ -17,7 +17,7 @@ from prometheus_client import REGISTRY
 from redis.exceptions import RedisError
 
 from posthog.constants import AvailableFeature
-from posthog.models import PropertyDefinition, User
+from posthog.models import User
 from posthog.redis import TEST_clear_clients
 from posthog.temporal.common.errors import NonReportableApplicationError
 from posthog.token_bucket import BucketUnavailable, Budget, TEST_reset_scripts, consume
@@ -57,6 +57,7 @@ from products.error_tracking.backend.temporal.lifecycle.issue_created.types impo
     IssueCreatedSnapshot,
     IssueCreatedWorkflowInputs,
 )
+from products.event_definitions.backend.models import PropertyDefinition
 
 SUMMARY_REPLY = {
     "what_happened": "Checkout throws when the cart is empty.",
@@ -245,6 +246,7 @@ class TestIssueSummaryGeneration(BaseTest):
         assert request["extra_headers"] == {"X-PostHog-Privacy-Mode": "true"}
         assert request["response_format"]["json_schema"]["strict"] is True
         assert self.build_client.call_args.kwargs["properties"]["issue_id"] == str(self.issue.id)
+        assert self.build_client.call_args.kwargs["ai_product"] == "error_tracking_issue_summaries"
         assert not issue_summaries.get_client().exists(self._lock_key)
 
     @parameterized.expand(
