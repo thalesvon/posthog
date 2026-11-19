@@ -1593,7 +1593,9 @@ tools:
                     - experimentId
                     - experiment_id
             feature_flag:
-                description: Flag variants, rollout, and payloads. Omitted settings are preserved. Running experiments require confirmation and update_feature_flag_params=true.
+                description:
+                    Flag variants, rollout, and payloads. Omitted settings are preserved. Running experiments require
+                    confirmation and update_feature_flag_params=true.
             running_time_calculation:
                 description: Persist the experiment's sample size, detectable effect, and planned running time.
             saved_metrics_ids:
