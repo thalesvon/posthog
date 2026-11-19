@@ -50,7 +50,7 @@ BATCH_URL = "/api/messaging/send/email_batch/"
 SINGLE_URL = "/api/messaging/send/email/"
 MESSAGE_ID = "0196a8f0-0000-7000-8000-000000000001"
 SECOND_MESSAGE_ID = "0196a8f0-0000-7000-8000-000000000002"
-ACCEPTED = {
+ACCEPTED: dict[str, Any] = {
     "status": 202,
     "body": {
         "invocation_id": MESSAGE_ID,
@@ -108,6 +108,10 @@ BATCH_WIRE = {
 def _slot_request(forwarded: dict[str, Any], recipient: dict[str, Any]) -> dict[str, Any]:
     slot = {**recipient, "variables": {**forwarded.get("variables", {}), **recipient.get("variables", {})}}
     return {**slot, "send": forwarded["send"]} if "send" in forwarded else slot
+
+
+def _sent_by(sender_kind: str | None) -> dict[str, str]:
+    return {"sender_kind": sender_kind} if sender_kind else {}
 
 
 def _batch_answer(*results: dict[str, Any]) -> requests.Response:
@@ -777,10 +781,10 @@ class TestTransactionalEmailBatch(APIBaseTest):
         self, mock_post, _flag, _capture, _name, form, queued_sender_kind, replayed_sender_kind, warns
     ):
         mock_post.return_value = _batch_answer(
-            {"status": 202, "body": {**ACCEPTED["body"], "sender_kind": queued_sender_kind}},
+            {"status": 202, "body": {**ACCEPTED["body"], **_sent_by(queued_sender_kind)}},
             {
                 "status": 202,
-                "body": {"invocation_id": SECOND_MESSAGE_ID, "replayed": True, "sender_kind": replayed_sender_kind},
+                "body": {"invocation_id": SECOND_MESSAGE_ID, "replayed": True, **_sent_by(replayed_sender_kind)},
             },
             {"status": 422, "body": {"error": "sandbox_recipient_not_member"}},
         )
