@@ -511,7 +511,7 @@ export class TransactionalSends {
         stages.start('intake_produce')
         const statusAt = new Date().toISOString()
         const results = await Promise.all(
-            runs.map(async ({ request, invocation, fingerprint }, i): Promise<TransactionalSendResult> => {
+            runs.map(async ({ invocation, fingerprint }, i): Promise<TransactionalSendResult> => {
                 const found = recalled[i]
                 if (found.status !== 'absent') {
                     if (!claimedBySameRequest(fingerprint, found.claimedFingerprint)) {

@@ -22,7 +22,7 @@ import supertest from 'supertest'
 import express from 'ultimate-express'
 import { version as uuidVersion } from 'uuid'
 
-import { keyedRunId } from '~/cdp/intake/run-intake'
+import { ASYNC_RECALL_BUDGET_MS, keyedRunId } from '~/cdp/intake/run-intake'
 import { CyclotronInputType } from '~/cdp/schema/cyclotron'
 import { HogFlow } from '~/cdp/schema/hogflow'
 import { EncryptedFields } from '~/cdp/utils/encryption-utils'
@@ -5721,18 +5721,21 @@ describe('CDP API', () => {
                         table: 'workflows_teamworkflowsconfig',
                         deadlineMs: 500,
                         warm: false,
+                        answersWithinMs: ASYNC_REFUSAL_BUDGET_MS,
                     },
-                    // A warm pod finishes its checks well inside the deadline, which ends while the claim read waits.
+                    // A warm pod finishes its checks well inside the deadline, which ends while the claim read waits. The
+                    // claim read's own budget would also refuse the batch, so the answer must come before that budget ends.
                     {
                         stall: 'its claim read stalls',
                         databaseUrl: () => hub.CYCLOTRON_NODE_DATABASE_URL,
                         table: 'cyclotron_idempotency_keys',
                         deadlineMs: 100,
                         warm: true,
+                        answersWithinMs: ASYNC_RECALL_BUDGET_MS,
                     },
                 ])(
                     'refuses a batch at its deadline and publishes none of it when $stall',
-                    async ({ databaseUrl, table, deadlineMs, warm }) => {
+                    async ({ databaseUrl, table, deadlineMs, warm, answersWithinMs }) => {
                         const { app: own } = await servedWith({ CDP_TRANSACTIONAL_EMAIL_BATCH_DEADLINE_MS: deadlineMs })
                         if (warm) {
                             expect(
@@ -5751,7 +5754,7 @@ describe('CDP API', () => {
 
                         expect([res.status, res.body]).toEqual([503, { error: 'deadline_exceeded' }])
                         expect(blockedQueries).toBeGreaterThan(0)
-                        expect(answeredAfterMs).toBeLessThan(ASYNC_REFUSAL_BUDGET_MS)
+                        expect(answeredAfterMs).toBeLessThan(answersWithinMs)
                         expect(publishedTo()).not.toContain(stalled.distinct_id)
                     }
                 )
