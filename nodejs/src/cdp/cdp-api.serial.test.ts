@@ -1,6 +1,6 @@
 // Serial: resets shared Postgres and relies on the reset-created default team.
 import { createInMemoryJobQueue, createMockJobQueue } from '../../tests/helpers/mocks/job-queue.mock'
-import { mockProducer, mockProducerObserver } from '../../tests/helpers/mocks/producer.mock'
+import { holdKafkaAcks, mockProducer, mockProducerObserver } from '../../tests/helpers/mocks/producer.mock'
 import { mockFetch } from '../../tests/helpers/mocks/request.mock'
 
 import { KafkaProducerObserver } from '~/tests/helpers/mocks/producer.spy'
@@ -19,14 +19,13 @@ import { version as uuidVersion } from 'uuid'
 
 import { INTAKE_ACK_DEADLINE_MS } from '~/cdp/intake/intake-producer'
 import { keyedRunId } from '~/cdp/intake/run-intake'
-import { CDP_INTAKE_TRANSACTIONAL_EMAIL_OUTPUT } from '~/cdp/outputs/outputs'
 import { CyclotronInputType } from '~/cdp/schema/cyclotron'
 import { HogFlow } from '~/cdp/schema/hogflow'
 import { EncryptedFields } from '~/cdp/utils/encryption-utils'
 import { PosthogJwtAudience } from '~/cdp/utils/jwt-utils'
 import { ScopedServiceJwt } from '~/cdp/utils/scoped-service-jwt'
 import { setupExpressApp } from '~/common/api/router'
-import { KAFKA_EMAIL_STATUS } from '~/common/config/kafka-topics'
+import { KAFKA_CDP_INTAKE_TRANSACTIONAL_EMAIL, KAFKA_EMAIL_STATUS } from '~/common/config/kafka-topics'
 import { KafkaProducerWrapper } from '~/common/kafka/producer'
 import { APP_METRICS_OUTPUT } from '~/common/outputs'
 import { PersonReadRepository } from '~/common/persons/repositories/person-repository'
@@ -5678,7 +5677,7 @@ describe('CDP API', () => {
                     ['shadow', 'CDP_INTAKE_KAFKA_SHADOW_TEAMS', { status: 202, body: queued }],
                 ])(
                     "keeps a recipient's slot until its %s intake publish is acked, past the ack deadline",
-                    async (_mode, teamsSetting, firstReply) => {
+                    async (mode, teamsSetting, firstReply) => {
                         const { app: own } = await servedWith({
                             CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_SLOTS: 1,
                             // Room past the ack deadline for the request's lookups on a slow runner, so the ack
@@ -5687,24 +5686,12 @@ describe('CDP API', () => {
                             CDP_TRANSACTIONAL_EMAIL_BATCH_DEADLINE_MS: INTAKE_ACK_DEADLINE_MS + 2_000,
                             [teamsSetting]: String(team.id),
                         })
-                        const intakeOutput = served.at(-1)!.cdpApi['outputs']['outputs'][
-                            CDP_INTAKE_TRANSACTIONAL_EMAIL_OUTPUT
-                        ] as unknown as { topic: string; producer: KafkaProducerWrapper }
-                        // The suite's broker is a mock whose produce calls its delivery callback at once. Holding that
-                        // callback for the intake topic holds the broker's ack.
-                        const broker = intakeOutput.producer['producer'] as unknown as { produce: jest.Mock }
-                        const deliver = broker.produce.getMockImplementation()!
-                        let ack: () => void = () => {}
-                        const acked = new Promise<void>((resolve) => (ack = resolve))
-                        broker.produce.mockImplementation((topic: string, ...rest: unknown[]) =>
-                            topic === intakeOutput.topic
-                                ? void acked.then(() => deliver(topic, ...rest))
-                                : deliver(topic, ...rest)
-                        )
+                        const produced = observeKafka()
+                        const heldAcks = holdKafkaAcks(KAFKA_CDP_INTAKE_TRANSACTIONAL_EMAIL)
                         try {
                             const unacked = await sendBatchTo(own, TEMPLATE, batchOf(recipient('ada@example.com')))
                             const whileUnacked = await sendBatchTo(own, TEMPLATE, batchOf(recipient('bo@example.com')))
-                            ack()
+                            heldAcks.release()
 
                             expect(unacked.body.results).toEqual([firstReply])
                             expect(whileUnacked.body.results).toEqual([
@@ -5716,9 +5703,17 @@ describe('CDP API', () => {
                                         .results
                                 ).toEqual([{ status: 202, body: queued }])
                             )
+                            // A recipient answered `not_attempted` must not go out once its permit frees. Shadow stores
+                            // a run per sent recipient and async stores none, and both modes publish one intake record
+                            // per sent recipient.
+                            expect((await storedRuns()).map(({ to }) => to)).toEqual(
+                                mode === 'shadow' ? ['ada@example.com', 'cy@example.com'] : []
+                            )
+                            expect(produced().filter((message) => message.kind === 'transactional-email')).toHaveLength(
+                                2
+                            )
                         } finally {
-                            ack()
-                            broker.produce.mockImplementation(deliver)
+                            heldAcks.release()
                         }
                     }
                 )
