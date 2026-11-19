@@ -25,7 +25,7 @@ import { EncryptedFields } from '~/cdp/utils/encryption-utils'
 import { PosthogJwtAudience } from '~/cdp/utils/jwt-utils'
 import { ScopedServiceJwt } from '~/cdp/utils/scoped-service-jwt'
 import { setupExpressApp } from '~/common/api/router'
-import { KAFKA_CDP_INTAKE_TRANSACTIONAL_EMAIL, KAFKA_EMAIL_STATUS } from '~/common/config/kafka-topics'
+import { KAFKA_EMAIL_STATUS } from '~/common/config/kafka-topics'
 import { KafkaProducerWrapper } from '~/common/kafka/producer'
 import { APP_METRICS_OUTPUT } from '~/common/outputs'
 import { PersonReadRepository } from '~/common/persons/repositories/person-repository'
@@ -5686,8 +5686,7 @@ describe('CDP API', () => {
                             CDP_TRANSACTIONAL_EMAIL_BATCH_DEADLINE_MS: INTAKE_ACK_DEADLINE_MS + 2_000,
                             [teamsSetting]: String(team.id),
                         })
-                        const produced = observeKafka()
-                        const heldAcks = holdKafkaAcks(KAFKA_CDP_INTAKE_TRANSACTIONAL_EMAIL)
+                        const heldAcks = holdKafkaAcks(hub.CDP_INTAKE_TRANSACTIONAL_EMAIL_TOPIC)
                         try {
                             const unacked = await sendBatchTo(own, TEMPLATE, batchOf(recipient('ada@example.com')))
                             const whileUnacked = await sendBatchTo(own, TEMPLATE, batchOf(recipient('bo@example.com')))
@@ -5709,9 +5708,9 @@ describe('CDP API', () => {
                             expect((await storedRuns()).map(({ to }) => to)).toEqual(
                                 mode === 'shadow' ? ['ada@example.com', 'cy@example.com'] : []
                             )
-                            expect(produced().filter((message) => message.kind === 'transactional-email')).toHaveLength(
-                                2
-                            )
+                            expect(
+                                heldAcks.received().map((value) => parseJSON(value.toString()).job.distinctId)
+                            ).toEqual(['person-ada@example.com', 'person-cy@example.com'])
                         } finally {
                             heldAcks.release()
                         }

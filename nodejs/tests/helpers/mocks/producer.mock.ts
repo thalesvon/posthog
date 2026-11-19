@@ -52,12 +52,11 @@ export const mockProducerObserver = new KafkaProducerObserver(mockProducer)
 
 const mockBroker = require('~/common/kafka/producer')._broker as { produce: jest.Mock }
 
-/**
- * Holds the broker's ack of every message produced to `topic`, so each produce stays pending as if the broker never
- * answered. `release()` acks the held messages and makes the broker ack at once again.
- */
-export const holdKafkaAcks = (topic: string): { release: () => void } => {
+// `release()` also makes the broker ack at once again. `received()` returns the values the broker got on `topic`
+// since the hold started, released or not.
+export const holdKafkaAcks = (topic: string): { release: () => void; received: () => Buffer[] } => {
     const deliver = mockBroker.produce.getMockImplementation()!
+    const from = mockBroker.produce.mock.calls.length
     let ack: () => void = () => {}
     const acked = new Promise<void>((resolve) => (ack = resolve))
     mockBroker.produce.mockImplementation((...args: unknown[]) =>
@@ -68,5 +67,10 @@ export const holdKafkaAcks = (topic: string): { release: () => void } => {
             ack()
             mockBroker.produce.mockImplementation(deliver)
         },
+        received: () =>
+            mockBroker.produce.mock.calls
+                .slice(from)
+                .filter(([calledTopic]) => calledTopic === topic)
+                .map(([, , value]) => value as Buffer),
     }
 }
