@@ -223,11 +223,13 @@ class TestTransactionalEmailStatus(ClickhouseTestMixin, APIBaseTest):
             ("a_key_with_a_space", "idempotency_key=a%20key", status.HTTP_400_BAD_REQUEST),
             ("a_key_of_no_send", "idempotency_key=another-key", status.HTTP_404_NOT_FOUND),
             ("a_key_of_another_projects_send", "idempotency_key=a-key", status.HTTP_404_NOT_FOUND),
+            ("the_id_of_another_projects_send", "message_id={message_id}", status.HTTP_404_NOT_FOUND),
         ]
     )
     def test_a_lookup_names_exactly_one_email_it_can_report(self, _flag, _name, query, expected_status):
-        self.message_id = str(keyed_message_id(self.team.id + 1, "a-key"))
-        self._status_rows([("queued", 0, "")])
+        other_project = Team.objects.create(organization=self.organization, name="Other")
+        self.message_id = str(keyed_message_id(other_project.id, "a-key"))
+        self._status_rows([("queued", 0, "")], team=other_project)
 
         response = self.client.get(f"/api/messaging/emails/status/?{query.format(message_id=self.message_id)}")
 
