@@ -5679,30 +5679,35 @@ describe('CDP API', () => {
                         CDP_TRANSACTIONAL_EMAIL_BATCH_DEADLINE_MS: INTAKE_ACK_DEADLINE_MS + 500,
                         CDP_INTAKE_KAFKA_ASYNC_TEAMS: String(team.id),
                     })
-                    const outputs = served.at(-1)!.cdpApi['outputs']
-                    const produce = outputs.produce.bind(outputs)
+                    const intakeOutput = served.at(-1)!.cdpApi['outputs']['outputs'][
+                        CDP_INTAKE_TRANSACTIONAL_EMAIL_OUTPUT
+                    ] as unknown as { topic: string; producer: KafkaProducerWrapper }
+                    // The suite's broker is a mock whose produce calls its delivery callback at once. Holding that
+                    // callback for the intake topic holds the broker's ack.
+                    const broker = intakeOutput.producer['producer'] as unknown as { produce: jest.Mock }
+                    const deliver = broker.produce.getMockImplementation()!
                     let ack: () => void = () => {}
                     const acked = new Promise<void>((resolve) => (ack = resolve))
-                    jest.spyOn(outputs, 'produce').mockImplementation(async (output, message) => {
-                        if (output === CDP_INTAKE_TRANSACTIONAL_EMAIL_OUTPUT) {
-                            await acked
-                        }
-                        return produce(output, message)
-                    })
-
-                    // The first recipient answers once its produce passes the ack deadline, and the produce runs on.
-                    expect((await sendBatchTo(own, TEMPLATE, batchOf(recipient('ada@example.com')))).status).toEqual(
-                        200
+                    broker.produce.mockImplementation((topic: string, ...rest: unknown[]) =>
+                        topic === intakeOutput.topic
+                            ? void acked.then(() => deliver(topic, ...rest))
+                            : deliver(topic, ...rest)
                     )
-                    const whileUnacked = await sendBatchTo(own, TEMPLATE, batchOf(recipient('bo@example.com')))
-                    ack()
+                    try {
+                        const unacked = await sendBatchTo(own, TEMPLATE, batchOf(recipient('ada@example.com')))
+                        const whileUnacked = await sendBatchTo(own, TEMPLATE, batchOf(recipient('bo@example.com')))
+                        ack()
 
-                    expect(whileUnacked.body.results).toEqual([{ status: 503, body: { error: 'not_attempted' } }])
-                    await waitForExpect(async () =>
-                        expect(
-                            (await sendBatchTo(own, TEMPLATE, batchOf(recipient('cy@example.com')))).body.results
-                        ).toEqual([{ status: 202, body: queued }])
-                    )
+                        expect(unacked.body.results).toEqual([{ status: 503, body: { error: 'intake_unavailable' } }])
+                        expect(whileUnacked.body.results).toEqual([{ status: 503, body: { error: 'not_attempted' } }])
+                        await waitForExpect(async () =>
+                            expect(
+                                (await sendBatchTo(own, TEMPLATE, batchOf(recipient('cy@example.com')))).body.results
+                            ).toEqual([{ status: 202, body: queued }])
+                        )
+                    } finally {
+                        broker.produce.mockImplementation(deliver)
+                    }
                 })
 
                 it('answers by its deadline while a recipient waits on a held claim, and keeps its permit until it settles', async () => {

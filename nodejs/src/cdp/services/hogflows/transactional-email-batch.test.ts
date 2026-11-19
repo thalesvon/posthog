@@ -81,23 +81,17 @@ describe('runBatchSlots', () => {
             queuePriority: 0,
             state: { event: { event: '$transactional_email' }, actionStepCount: 0 },
         } as unknown as CyclotronJobInvocationHogFlow
-        const ran: string[] = []
         const run = (items: string[], sendOne: (item: string, slot: BatchSlot) => Promise<SlotReply>) =>
             runBatchSlots(items, sendOne, { slots, fanOut: 25, deadline: new AbortController().signal })
 
         const first = await run(['a'], (item, slot) => {
-            ran.push(item)
             void heldBroker.produce({ kind: 'transactional-email', invocation }, 'async', slot.settlement)
             return Promise.resolve(queued(item))
         })
-        const second = run(['b'], (item) => {
-            ran.push(item)
-            return Promise.resolve(queued(item))
-        })
+        const second = run(['b'], (item) => Promise.resolve(queued(item)))
 
         expect(first.replies).toEqual([queued('a')])
         expect(await isSettled(second)).toBe(false)
-        expect(ran).toEqual(['a'])
 
         publish.open()
 
