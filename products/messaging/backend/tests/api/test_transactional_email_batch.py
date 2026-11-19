@@ -298,7 +298,6 @@ class TestTransactionalEmailBatch(APIBaseTest):
                 400,
                 "mesage_data",
             ),
-            ("shared_subject_that_is_not_json", "code", {"subject": float("nan")}, 400, None),
             ("shared_field_name_that_is_not_valid_unicode", "code", {"\ud800": 1}, 400, "\\ud800"),
             ("shared_legacy_identifiers", "template", {"identifiers": {"distinct_id": "person-1"}}, 400, "identifiers"),
             (
@@ -420,6 +419,23 @@ class TestTransactionalEmailBatch(APIBaseTest):
             response = self.psak.post(BATCH_URL, json.dumps(body), content_type=content_type)
 
         assert response.status_code == status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, response.json()
+        mock_post.assert_not_called()
+
+    @parameterized.expand(
+        [
+            ("constant_that_is_not_json", "NaN", 400, "parse_error"),
+            ("number_beyond_a_float", "1e400", 400, "parse_error"),
+            ("cut_off_over_the_batch_cap", '"' + "x" * 6 * 1024 * 1024, 413, "content_too_large"),
+        ]
+    )
+    def test_refuses_a_batch_body_that_is_not_strict_json(
+        self, mock_post, _flag, _capture, _name, subject, expected_status, expected_code
+    ):
+        body = json.dumps({**self._email("code"), "subject": "SUBJECT", "recipients": self._recipients(1)})
+
+        response = self.psak.post(BATCH_URL, body.replace('"SUBJECT"', subject), content_type="application/json")
+
+        assert (response.status_code, response.json()["code"]) == (expected_status, expected_code)
         mock_post.assert_not_called()
 
     def test_a_duplicate_key_names_both_recipients(self, mock_post, _flag, _capture):
@@ -684,6 +700,7 @@ class TestTransactionalEmailBatch(APIBaseTest):
         [
             ("batch_flag_off", "template", {TRANSACTIONAL_EMAIL_API_FLAG, EMAIL_FROM_CODE_FLAG}),
             ("batch_flag_off_form_encoded", "form", {TRANSACTIONAL_EMAIL_API_FLAG, EMAIL_FROM_CODE_FLAG}),
+            ("batch_flag_off_malformed_json", "malformed", {TRANSACTIONAL_EMAIL_API_FLAG, EMAIL_FROM_CODE_FLAG}),
             ("batch_flag_off_over_the_upload_ceiling", "huge", {TRANSACTIONAL_EMAIL_API_FLAG, EMAIL_FROM_CODE_FLAG}),
             ("template_flag_off", "template", {EMAIL_BATCH_FLAG, EMAIL_FROM_CODE_FLAG}),
             ("code_flag_off", "code", {EMAIL_BATCH_FLAG, TRANSACTIONAL_EMAIL_API_FLAG}),
@@ -695,6 +712,8 @@ class TestTransactionalEmailBatch(APIBaseTest):
         with override_settings(DATA_UPLOAD_MAX_MEMORY_SIZE=1024 * 1024):
             if form == "form":
                 response = self._form_encoded_batch()
+            elif form == "malformed":
+                response = self.psak.post(BATCH_URL, '{"recipients": [', content_type="application/json")
             elif form == "huge":
                 response = self._batch("template", message_data={"blob": "x" * 2 * 1024 * 1024})
             else:

@@ -29,8 +29,9 @@ from products.messaging.backend.presentation.views.attachment_uploads import Mes
 from products.messaging.backend.presentation.views.email_batch import (
     BATCH_BODY_MAX_BYTES,
     EMAIL_BATCH_RESPONSES,
+    BatchJSONParser,
     SendEmailBatchSerializer,
-    StrictJSONParser,
+    UnreadBody,
     batch_body_too_large,
     email_batch_outcome,
     email_batch_response,
@@ -93,7 +94,7 @@ class KeyScopedMessagingSendViewSet(MessagingSendViewSet):
     @action(
         detail=False,
         methods=["POST"],
-        parser_classes=[StrictJSONParser],
+        parser_classes=[BatchJSONParser],
         required_scopes=[TRANSACTIONAL_EMAIL_SEND_SCOPE],
     )
     def email_batch(self, request: Any, *args: Any, **kwargs: Any) -> Response:
@@ -103,6 +104,8 @@ class KeyScopedMessagingSendViewSet(MessagingSendViewSet):
             raise UnsupportedMediaType(request.content_type)
         if len(request.body) > BATCH_BODY_MAX_BYTES:
             raise RequestDataTooBig()
+        if isinstance(request.data, UnreadBody):
+            raise request.data.refusal
         takes_template_key = isinstance(request.data, Mapping) and "template_key" in request.data
         (require_email_from_code if takes_template_key else require_transactional_email_api)(self.team)
         if refusal := refused_batch_field(request.data, takes_template_key=takes_template_key):

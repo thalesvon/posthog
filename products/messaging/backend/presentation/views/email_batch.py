@@ -1,10 +1,15 @@
+import json
+import math
 from collections.abc import Mapping
 from functools import cache
 from typing import Any
 
+from django.conf import settings
+
 from drf_spectacular.utils import OpenApiResponse
 from rest_framework import serializers, status
-from rest_framework.parsers import JSONParser
+from rest_framework.exceptions import APIException, ParseError, UnsupportedMediaType
+from rest_framework.parsers import BaseParser, JSONParser
 
 from posthog.api.fields import LengthFirstListField
 from posthog.api.mixins import ResponseDeclaration
@@ -48,8 +53,35 @@ NOT_ATTEMPTED_EMAIL = (
 )
 
 
-class StrictJSONParser(JSONParser):
-    strict = True
+class UnreadBody(dict[str, Any]):
+    def __init__(self, refusal: APIException) -> None:
+        super().__init__()
+        self.refusal = refusal
+
+
+class BatchJSONParser(BaseParser):
+    media_type = "*/*"
+
+    def parse(self, stream: Any, media_type: str | None = None, parser_context: Mapping[str, Any] | None = None) -> Any:
+        if (media_type or "").split(";")[0].strip().lower() != JSONParser.media_type:
+            return UnreadBody(UnsupportedMediaType(media_type))
+        context = parser_context or {}
+        body = context["request"].body if "request" in context else stream.read()
+        try:
+            text = body.decode(context.get("encoding", settings.DEFAULT_CHARSET))
+            return json.loads(text, parse_constant=_refused_constant, parse_float=_finite)
+        except ValueError as e:
+            return UnreadBody(ParseError(f"JSON parse error - {e}"))
+
+
+def _refused_constant(text: str) -> float:
+    raise ValueError(f"{text} isn't a JSON value")
+
+
+def _finite(text: str) -> float:
+    if not math.isfinite(value := float(text)):
+        raise ValueError(f"{text} is out of range")
+    return value
 
 
 class EmailBatchRecipientSerializer(serializers.Serializer):
