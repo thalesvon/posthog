@@ -249,6 +249,13 @@ def set_created_by(configuration_id: UUID, created_by_id: int | None) -> None:
     PlatformAlertConfiguration.objects.filter(id=configuration_id).update(created_by_id=created_by_id)
 
 
+def set_owner(configuration_id: UUID, owner: str) -> None:
+    """Hand a configuration to another stack without the handover's side effects, as a handover that
+    commits in the middle of a reader's work leaves it. The caller holds the team scope."""
+    # nosemgrep: idor-lookup-without-team — fail-closed model; the caller holds the team scope
+    PlatformAlertConfiguration.objects.filter(id=configuration_id).update(owner=owner)
+
+
 def set_enabled(configuration_id: UUID, enabled: bool) -> None:
     """Switch a configuration on or off, as a broken check the platform owns leaves it.
 
