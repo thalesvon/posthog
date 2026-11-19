@@ -16946,6 +16946,38 @@ export namespace Schemas {
       readonly updated_at: string | null;
     }
 
+    /**
+     * * `human` - Approved by a person
+     * * `automated_only` - Approved by bots only
+     * * `none` - No approval before merge
+     */
+    export type PullRequestApprovalEnum = typeof PullRequestApprovalEnum[keyof typeof PullRequestApprovalEnum];
+
+
+    export const PullRequestApprovalEnum = {
+      Human: 'human',
+      AutomatedOnly: 'automated_only',
+      None: 'none',
+    } as const;
+
+    export interface ApprovalRevertOutcome {
+      /** Who approved the pull request before it merged: 'human' when at least one person approved, 'automated_only' when every approval came from a bot account, 'none' when no approval was recorded. An approval bot may approve only the pull requests its risk policy allows, so the 'automated_only' share reflects that selection as well as the effect of the approval.
+       *
+       * * `human` - Approved by a person
+       * * `automated_only` - Approved by bots only
+       * * `none` - No approval before merge */
+      approval: PullRequestApprovalEnum;
+      /** Pull requests merged in the window, excluding pull requests that are themselves reverts. */
+      merged_pr_count: number;
+      /** How many of those pull requests a later merged revert names in its description. A recent merge can still be reverted, so this count can grow. */
+      reverted_pr_count: number;
+      /**
+         * reverted_pr_count divided by merged_pr_count. Null when nothing merged.
+         * @nullable
+         */
+      reverted_share: number | null;
+    }
+
     export interface ApproveSnapshotInput {
       /** The snapshot identifier to approve (e.g. Storybook story id plus theme). */
       identifier: string;
@@ -17685,6 +17717,38 @@ export namespace Schemas {
       truncated: boolean;
       /** Maximum number of pull requests returned in `items`. */
       limit: number;
+    }
+
+    /**
+     * * `bot` - Bot account
+     * * `agent_context` - Agent context filled in
+     * * `no_agent_context` - No agent context
+     */
+    export type PullRequestAuthorshipEnum = typeof PullRequestAuthorshipEnum[keyof typeof PullRequestAuthorshipEnum];
+
+
+    export const PullRequestAuthorshipEnum = {
+      Bot: 'bot',
+      AgentContext: 'agent_context',
+      NoAgentContext: 'no_agent_context',
+    } as const;
+
+    export interface AuthorshipRevertOutcome {
+      /** How the pull request was authored: 'bot' for a bot account, 'agent_context' when a person opened it and the description's Agent context section names a tool and model, 'no_agent_context' otherwise. A pull request without the section can still be agent-assisted.
+       *
+       * * `bot` - Bot account
+       * * `agent_context` - Agent context filled in
+       * * `no_agent_context` - No agent context */
+      authorship: PullRequestAuthorshipEnum;
+      /** Pull requests merged in the window, excluding pull requests that are themselves reverts. */
+      merged_pr_count: number;
+      /** How many of those pull requests a later merged revert names in its description. A recent merge can still be reverted, so this count can grow. */
+      reverted_pr_count: number;
+      /**
+         * reverted_pr_count divided by merged_pr_count. Null when nothing merged.
+         * @nullable
+         */
+      reverted_share: number | null;
     }
 
     /**
@@ -97058,6 +97122,17 @@ export namespace Schemas {
          */
       write_scopes?: string[];
       /**
+         * Report actions this scout may start on inbox reports, from `make_it_green`. Empty by default, so every start is refused. A scout cannot send its own message with an action. Each action starts an agent run with the full access of the person the scout's runs act as, so only that person can add one. A project admin can remove one. A scoped API key needs `inbox:write` and `task:write`. A dry run never holds the grant. Applies from the scout's next run.
+         * @maxItems 1
+         */
+      report_actions?: string[];
+      /**
+         * Report actions this scout may start per rolling 24 hours, across all its runs. Defaults to 3. Only the person the scout's runs act as can raise it. A project admin can lower it.
+         * @minimum 0
+         * @maximum 20
+         */
+      max_report_actions_per_day?: number;
+      /**
          * Optional HogQL `SELECT` a scheduled run evaluates before it starts. When it returns no rows, or one row with one false value (`false`, `0`, null or empty), the run is skipped: no sandbox, no model call, and no run row. Any other result starts the run, and the scout reads the rows. A query error also starts the run. Use `{since}` (the start of the last run that ran, or when the scout was created) and `{now}` to look only at what is new, e.g. `SELECT count() FROM events WHERE event = '$exception' AND timestamp > {since}`. To run at least once a week however quiet it is, add `OR {since} < {now} - INTERVAL 7 DAY` to the condition. Only scheduled runs evaluate it: a manual or workflow run always starts. `{interval_minutes}` is the gap between two scheduled runs, so a backstop can follow the schedule: `{since} < {now} - toIntervalMinute(greatest(1440, 2 * {interval_minutes}))` runs at least daily and never more often than every two intervals. The query stops after 10 seconds and reads at most 50 rows. Try a query with `scout-config-precheck-test` before you save it. Null or blank uses the default pre-check the scout's skill ships, if any. To turn every pre-check off, set `precheck_disabled`.
          * @maxLength 10000
          * @nullable
@@ -111921,6 +111996,62 @@ export namespace Schemas {
       detail: string;
     }
 
+    export interface RevertedPullRequest {
+      /** Number of the pull request that was reverted. */
+      number: number;
+      /** Title of the reverted pull request. */
+      title: string;
+      /** When the reverted pull request merged. */
+      merged_at: string;
+      /** How the pull request was authored: 'bot' for a bot account, 'agent_context' when a person opened it and the description's Agent context section names a tool and model, 'no_agent_context' otherwise. A pull request without the section can still be agent-assisted.
+       *
+       * * `bot` - Bot account
+       * * `agent_context` - Agent context filled in
+       * * `no_agent_context` - No agent context */
+      authorship: PullRequestAuthorshipEnum;
+      /** Who approved the pull request before it merged: 'human' when at least one person approved, 'automated_only' when every approval came from a bot account, 'none' when no approval was recorded. An approval bot may approve only the pull requests its risk policy allows, so the 'automated_only' share reflects that selection as well as the effect of the approval. Null when the reviews table is not synced.
+       *
+       * * `human` - Approved by a person
+       * * `automated_only` - Approved by bots only
+       * * `none` - No approval before merge */
+      approval: PullRequestApprovalEnum | null;
+      /** Number of the earliest merged pull request that reverted it. */
+      reverting_pr_number: number;
+      /** When that reverting pull request merged. */
+      reverted_at: string;
+      /** Seconds from the merge to the merge of its revert. */
+      merge_to_revert_seconds: number;
+    }
+
+    export interface RevertOutcomes {
+      /** One entry per authorship value, including values with no merges. Empty when body_data_available is false. */
+      by_authorship: AuthorshipRevertOutcome[];
+      /** One entry per approval value, including values with no merges. Empty when body_data_available or review_data_available is false. */
+      by_approval: ApprovalRevertOutcome[];
+      /** The reverted pull requests, most recently reverted first, capped at limit. */
+      reverted_pull_requests: RevertedPullRequest[];
+      /** Pull requests merged in the window, excluding pull requests that are themselves reverts. */
+      merged_pr_count: number;
+      /**
+         * How many of those pull requests a later merged revert names in its description. A recent merge can still be reverted, so this count can grow. Null when body_data_available is false.
+         * @nullable
+         */
+      reverted_pr_count: number | null;
+      /**
+         * reverted_pr_count divided by merged_pr_count. Null when nothing merged. Null when body_data_available is false.
+         * @nullable
+         */
+      reverted_share: number | null;
+      /** False when the synced pull requests table has no description column. A revert is linked to the change it undid through the revert's description, so no revert can be linked. */
+      body_data_available: boolean;
+      /** False when the reviews table is not synced for the selected repository. */
+      review_data_available: boolean;
+      /** True when more pull requests were reverted than reverted_pull_requests holds. */
+      truncated: boolean;
+      /** Maximum number of entries in reverted_pull_requests. */
+      limit: number;
+    }
+
     export interface ReviewBlindSpotsConfig {
       /** Name of the `review-hog-blind-spots-*` skill this row represents (the sweep's identity). */
       skill_name: string;
@@ -114112,6 +114243,17 @@ export namespace Schemas {
          * @maxItems 16
          */
       write_scopes?: string[];
+      /**
+         * Report actions this scout may start on inbox reports, from `make_it_green`. Empty by default, so every start is refused. A scout cannot send its own message with an action. Each action starts an agent run with the full access of the person the scout's runs act as, so only that person can add one. A project admin can remove one. A scoped API key needs `inbox:write` and `task:write`. A dry run never holds the grant. Applies from the scout's next run.
+         * @maxItems 1
+         */
+      report_actions?: string[];
+      /**
+         * Report actions this scout may start per rolling 24 hours, across all its runs. Defaults to 3. Only the person the scout's runs act as can raise it. A project admin can lower it.
+         * @minimum 0
+         * @maximum 20
+         */
+      max_report_actions_per_day?: number;
       /** Opt-in guard on this scout's lifecycle. Off by default, so anyone with scout write access may pause, resume, switch the scout to dry run, or delete it. On, only the person the scout's runs act as or a project admin may do any of those, or change this flag. Use it on a scout whose output people depend on: `signal_scout:write` is a project-wide scope held by people and by unattended agents alike, and a resume has to pass the project's enabled-scout maximum that a pause does not, so a bulk pause is not undone in one step. The lock never stops an automatic pause, such as the inactivity sweep or the repeated-failure breaker. */
       lifecycle_locked?: boolean;
       /**
@@ -114436,6 +114578,17 @@ export namespace Schemas {
          * @maxItems 16
          */
       readonly write_scopes: readonly string[];
+      /**
+         * Report actions this scout may start on inbox reports, from `make_it_green`. Empty by default, so every start is refused. A scout cannot send its own message with an action. Each action starts an agent run with the full access of the person the scout's runs act as, so only that person can add one. A project admin can remove one. A scoped API key needs `inbox:write` and `task:write`. A dry run never holds the grant. Applies from the scout's next run.
+         * @maxItems 1
+         */
+      readonly report_actions: readonly string[];
+      /**
+         * Report actions this scout may start per rolling 24 hours, across all its runs. Defaults to 3. Only the person the scout's runs act as can raise it. A project admin can lower it.
+         * @minimum 0
+         * @maximum 20
+         */
+      readonly max_report_actions_per_day: number;
       /** Opt-in guard on this scout's lifecycle. Off by default, so anyone with scout write access may pause, resume, switch the scout to dry run, or delete it. On, only the person the scout's runs act as or a project admin may do any of those, or change this flag. Use it on a scout whose output people depend on: `signal_scout:write` is a project-wide scope held by people and by unattended agents alike, and a resume has to pass the project's enabled-scout maximum that a pause does not, so a bulk pause is not undone in one step. The lock never stops an automatic pause, such as the inactivity sweep or the repeated-failure breaker. */
       readonly lifecycle_locked: boolean;
       /**
@@ -118604,6 +118757,17 @@ export namespace Schemas {
          * @maxItems 16
          */
       write_scopes?: string[];
+      /**
+         * Report actions this scout may start on inbox reports, from `make_it_green`. Empty by default, so every start is refused. A scout cannot send its own message with an action. Each action starts an agent run with the full access of the person the scout's runs act as, so only that person can add one. A project admin can remove one. A scoped API key needs `inbox:write` and `task:write`. A dry run never holds the grant. Applies from the scout's next run.
+         * @maxItems 1
+         */
+      report_actions?: string[];
+      /**
+         * Report actions this scout may start per rolling 24 hours, across all its runs. Defaults to 3. Only the person the scout's runs act as can raise it. A project admin can lower it.
+         * @minimum 0
+         * @maximum 20
+         */
+      max_report_actions_per_day?: number;
       /** Opt-in guard on this scout's lifecycle. Off by default, so anyone with scout write access may pause, resume, switch the scout to dry run, or delete it. On, only the person the scout's runs act as or a project admin may do any of those, or change this flag. Use it on a scout whose output people depend on: `signal_scout:write` is a project-wide scope held by people and by unattended agents alike, and a resume has to pass the project's enabled-scout maximum that a pause does not, so a bulk pause is not undone in one step. The lock never stops an automatic pause, such as the inactivity sweep or the repeated-failure breaker. */
       lifecycle_locked?: boolean;
       /**
@@ -118806,6 +118970,12 @@ export namespace Schemas {
       precheck_query?: string | null;
     }
 
+    export type SignalScoutRunDetailMetadataReportActionStartsItem = {
+      at?: string;
+      report_id?: string;
+      action?: string;
+    };
+
     export type SignalScoutRunDetailMetadataDerived = {
       has_emit_report: boolean;
       has_edit_report: boolean;
@@ -118817,7 +118987,7 @@ export namespace Schemas {
     };
 
     /**
-     * Scout-owned per-run context, in two regions. Top-level keys are stamped by the runner at run start. Always present: `harness_prompt_version` (id of the harness prompt build the run was given), `report_channel` (which report tools the run held: `none`, `emit`, `edit`, or `both`), `skill_origin` (`canonical` or `custom`), `github_guidance` (whether the run got the GitHub evidence section), and `business_knowledge_maintained` (whether the run got the business-knowledge section: the product flag is on and the team's knowledge base looks maintained) — the provenance set that says which instructions the run actually got, so runs are only compared against runs of the same shape. Present only when the run departed from a default: `model`, `runtime_adapter`, and `reasoning_effort` (routing overrode the agent-server default), `network_access` (`full` when the scout's config lifted the trusted-domain network restriction for this run), `write_scopes` (the extra write access the run's token carried, when the scout was granted any), and `triggered_by` (`manual` or `workflow` when the run was fired off-schedule; absent means the run came from the coordinator's schedule). The nested `derived` object is the harness's own map of boolean run dimensions, computed server-side at finalize: `has_emit_report`, `has_edit_report`, `has_self_improvement`, `has_chart`, `has_self_validation`, `has_structured_output`, and `has_not_in_use_closeout` (the run wrote a `not-in-use:` scratchpad entry and produced no report, finding, or structured output). Use `derived` to answer 'what kind of run was this?' instead of parsing the `summary` prose. Note the flags describe the reports the run authored as they stand now, so charts attached to someone else's report via an edit are not counted. A missing `derived` object is unknown, not all-false: the run predates the field, never finalized, or its stamp failed.
+     * Scout-owned per-run context, in two regions. Top-level keys are stamped by the runner at run start. Always present: `harness_prompt_version` (id of the harness prompt build the run was given), `report_channel` (which report tools the run held: `none`, `emit`, `edit`, or `both`), `skill_origin` (`canonical` or `custom`), `github_guidance` (whether the run got the GitHub evidence section), and `business_knowledge_maintained` (whether the run got the business-knowledge section: the product flag is on and the team's knowledge base looks maintained) — the provenance set that says which instructions the run actually got, so runs are only compared against runs of the same shape. Present only when the run departed from a default: `model`, `runtime_adapter`, and `reasoning_effort` (routing overrode the agent-server default), `network_access` (`full` when the scout's config lifted the trusted-domain network restriction for this run), `write_scopes` (the extra write access the run's token carried, when the scout was granted any), `report_actions` (the report actions the run could start, when the scout was granted any), `report_action_starts` (each report action the run started, with `at`, `report_id`, and `action`), and `triggered_by` (`manual` or `workflow` when the run was fired off-schedule; absent means the run came from the coordinator's schedule). The nested `derived` object is the harness's own map of boolean run dimensions, computed server-side at finalize: `has_emit_report`, `has_edit_report`, `has_self_improvement`, `has_chart`, `has_self_validation`, `has_structured_output`, and `has_not_in_use_closeout` (the run wrote a `not-in-use:` scratchpad entry and produced no report, finding, or structured output). Use `derived` to answer 'what kind of run was this?' instead of parsing the `summary` prose. Note the flags describe the reports the run authored as they stand now, so charts attached to someone else's report via an edit are not counted. A missing `derived` object is unknown, not all-false: the run predates the field, never finalized, or its stamp failed.
      */
     export type SignalScoutRunDetailMetadata = {
       harness_prompt_version?: string;
@@ -118831,6 +119001,8 @@ export namespace Schemas {
       service_tier?: string;
       network_access?: string;
       write_scopes?: string[];
+      report_actions?: string[];
+      report_action_starts?: SignalScoutRunDetailMetadataReportActionStartsItem[];
       triggered_by?: string;
       run_note?: string;
       derived?: SignalScoutRunDetailMetadataDerived;
@@ -118907,9 +119079,15 @@ export namespace Schemas {
       emitted_report_ids: string[];
       /** The `SignalReport` ids this run mutated via the `edit_report` channel (rewrote title/summary and/or appended a note), deduped. Distinct from `emitted_report_ids`: edit can target any inbox report, so these are generally not reports the run authored. Empty for runs that edited no report. */
       edited_report_ids: string[];
-      /** Scout-owned per-run context, in two regions. Top-level keys are stamped by the runner at run start. Always present: `harness_prompt_version` (id of the harness prompt build the run was given), `report_channel` (which report tools the run held: `none`, `emit`, `edit`, or `both`), `skill_origin` (`canonical` or `custom`), `github_guidance` (whether the run got the GitHub evidence section), and `business_knowledge_maintained` (whether the run got the business-knowledge section: the product flag is on and the team's knowledge base looks maintained) — the provenance set that says which instructions the run actually got, so runs are only compared against runs of the same shape. Present only when the run departed from a default: `model`, `runtime_adapter`, and `reasoning_effort` (routing overrode the agent-server default), `network_access` (`full` when the scout's config lifted the trusted-domain network restriction for this run), `write_scopes` (the extra write access the run's token carried, when the scout was granted any), and `triggered_by` (`manual` or `workflow` when the run was fired off-schedule; absent means the run came from the coordinator's schedule). The nested `derived` object is the harness's own map of boolean run dimensions, computed server-side at finalize: `has_emit_report`, `has_edit_report`, `has_self_improvement`, `has_chart`, `has_self_validation`, `has_structured_output`, and `has_not_in_use_closeout` (the run wrote a `not-in-use:` scratchpad entry and produced no report, finding, or structured output). Use `derived` to answer 'what kind of run was this?' instead of parsing the `summary` prose. Note the flags describe the reports the run authored as they stand now, so charts attached to someone else's report via an edit are not counted. A missing `derived` object is unknown, not all-false: the run predates the field, never finalized, or its stamp failed. */
+      /** Scout-owned per-run context, in two regions. Top-level keys are stamped by the runner at run start. Always present: `harness_prompt_version` (id of the harness prompt build the run was given), `report_channel` (which report tools the run held: `none`, `emit`, `edit`, or `both`), `skill_origin` (`canonical` or `custom`), `github_guidance` (whether the run got the GitHub evidence section), and `business_knowledge_maintained` (whether the run got the business-knowledge section: the product flag is on and the team's knowledge base looks maintained) — the provenance set that says which instructions the run actually got, so runs are only compared against runs of the same shape. Present only when the run departed from a default: `model`, `runtime_adapter`, and `reasoning_effort` (routing overrode the agent-server default), `network_access` (`full` when the scout's config lifted the trusted-domain network restriction for this run), `write_scopes` (the extra write access the run's token carried, when the scout was granted any), `report_actions` (the report actions the run could start, when the scout was granted any), `report_action_starts` (each report action the run started, with `at`, `report_id`, and `action`), and `triggered_by` (`manual` or `workflow` when the run was fired off-schedule; absent means the run came from the coordinator's schedule). The nested `derived` object is the harness's own map of boolean run dimensions, computed server-side at finalize: `has_emit_report`, `has_edit_report`, `has_self_improvement`, `has_chart`, `has_self_validation`, `has_structured_output`, and `has_not_in_use_closeout` (the run wrote a `not-in-use:` scratchpad entry and produced no report, finding, or structured output). Use `derived` to answer 'what kind of run was this?' instead of parsing the `summary` prose. Note the flags describe the reports the run authored as they stand now, so charts attached to someone else's report via an edit are not counted. A missing `derived` object is unknown, not all-false: the run predates the field, never finalized, or its stamp failed. */
       metadata: SignalScoutRunDetailMetadata;
     }
+
+    export type SignalScoutRunSummaryMetadataReportActionStartsItem = {
+      at?: string;
+      report_id?: string;
+      action?: string;
+    };
 
     export type SignalScoutRunSummaryMetadataDerived = {
       has_emit_report: boolean;
@@ -118922,7 +119100,7 @@ export namespace Schemas {
     };
 
     /**
-     * Scout-owned per-run context, in two regions. Top-level keys are stamped by the runner at run start. Always present: `harness_prompt_version` (id of the harness prompt build the run was given), `report_channel` (which report tools the run held: `none`, `emit`, `edit`, or `both`), `skill_origin` (`canonical` or `custom`), `github_guidance` (whether the run got the GitHub evidence section), and `business_knowledge_maintained` (whether the run got the business-knowledge section: the product flag is on and the team's knowledge base looks maintained) — the provenance set that says which instructions the run actually got, so runs are only compared against runs of the same shape. Present only when the run departed from a default: `model`, `runtime_adapter`, and `reasoning_effort` (routing overrode the agent-server default), `network_access` (`full` when the scout's config lifted the trusted-domain network restriction for this run), `write_scopes` (the extra write access the run's token carried, when the scout was granted any), and `triggered_by` (`manual` or `workflow` when the run was fired off-schedule; absent means the run came from the coordinator's schedule). The nested `derived` object is the harness's own map of boolean run dimensions, computed server-side at finalize: `has_emit_report`, `has_edit_report`, `has_self_improvement`, `has_chart`, `has_self_validation`, `has_structured_output`, and `has_not_in_use_closeout` (the run wrote a `not-in-use:` scratchpad entry and produced no report, finding, or structured output). Use `derived` to answer 'what kind of run was this?' instead of parsing the `summary` prose. Note the flags describe the reports the run authored as they stand now, so charts attached to someone else's report via an edit are not counted. A missing `derived` object is unknown, not all-false: the run predates the field, never finalized, or its stamp failed.
+     * Scout-owned per-run context, in two regions. Top-level keys are stamped by the runner at run start. Always present: `harness_prompt_version` (id of the harness prompt build the run was given), `report_channel` (which report tools the run held: `none`, `emit`, `edit`, or `both`), `skill_origin` (`canonical` or `custom`), `github_guidance` (whether the run got the GitHub evidence section), and `business_knowledge_maintained` (whether the run got the business-knowledge section: the product flag is on and the team's knowledge base looks maintained) — the provenance set that says which instructions the run actually got, so runs are only compared against runs of the same shape. Present only when the run departed from a default: `model`, `runtime_adapter`, and `reasoning_effort` (routing overrode the agent-server default), `network_access` (`full` when the scout's config lifted the trusted-domain network restriction for this run), `write_scopes` (the extra write access the run's token carried, when the scout was granted any), `report_actions` (the report actions the run could start, when the scout was granted any), `report_action_starts` (each report action the run started, with `at`, `report_id`, and `action`), and `triggered_by` (`manual` or `workflow` when the run was fired off-schedule; absent means the run came from the coordinator's schedule). The nested `derived` object is the harness's own map of boolean run dimensions, computed server-side at finalize: `has_emit_report`, `has_edit_report`, `has_self_improvement`, `has_chart`, `has_self_validation`, `has_structured_output`, and `has_not_in_use_closeout` (the run wrote a `not-in-use:` scratchpad entry and produced no report, finding, or structured output). Use `derived` to answer 'what kind of run was this?' instead of parsing the `summary` prose. Note the flags describe the reports the run authored as they stand now, so charts attached to someone else's report via an edit are not counted. A missing `derived` object is unknown, not all-false: the run predates the field, never finalized, or its stamp failed.
      */
     export type SignalScoutRunSummaryMetadata = {
       harness_prompt_version?: string;
@@ -118936,6 +119114,8 @@ export namespace Schemas {
       service_tier?: string;
       network_access?: string;
       write_scopes?: string[];
+      report_actions?: string[];
+      report_action_starts?: SignalScoutRunSummaryMetadataReportActionStartsItem[];
       triggered_by?: string;
       run_note?: string;
       derived?: SignalScoutRunSummaryMetadataDerived;
@@ -119012,7 +119192,7 @@ export namespace Schemas {
       emitted_report_ids: string[];
       /** The `SignalReport` ids this run mutated via the `edit_report` channel (rewrote title/summary and/or appended a note), deduped. Distinct from `emitted_report_ids`: edit can target any inbox report, so these are generally not reports the run authored. Empty for runs that edited no report. */
       edited_report_ids: string[];
-      /** Scout-owned per-run context, in two regions. Top-level keys are stamped by the runner at run start. Always present: `harness_prompt_version` (id of the harness prompt build the run was given), `report_channel` (which report tools the run held: `none`, `emit`, `edit`, or `both`), `skill_origin` (`canonical` or `custom`), `github_guidance` (whether the run got the GitHub evidence section), and `business_knowledge_maintained` (whether the run got the business-knowledge section: the product flag is on and the team's knowledge base looks maintained) — the provenance set that says which instructions the run actually got, so runs are only compared against runs of the same shape. Present only when the run departed from a default: `model`, `runtime_adapter`, and `reasoning_effort` (routing overrode the agent-server default), `network_access` (`full` when the scout's config lifted the trusted-domain network restriction for this run), `write_scopes` (the extra write access the run's token carried, when the scout was granted any), and `triggered_by` (`manual` or `workflow` when the run was fired off-schedule; absent means the run came from the coordinator's schedule). The nested `derived` object is the harness's own map of boolean run dimensions, computed server-side at finalize: `has_emit_report`, `has_edit_report`, `has_self_improvement`, `has_chart`, `has_self_validation`, `has_structured_output`, and `has_not_in_use_closeout` (the run wrote a `not-in-use:` scratchpad entry and produced no report, finding, or structured output). Use `derived` to answer 'what kind of run was this?' instead of parsing the `summary` prose. Note the flags describe the reports the run authored as they stand now, so charts attached to someone else's report via an edit are not counted. A missing `derived` object is unknown, not all-false: the run predates the field, never finalized, or its stamp failed. */
+      /** Scout-owned per-run context, in two regions. Top-level keys are stamped by the runner at run start. Always present: `harness_prompt_version` (id of the harness prompt build the run was given), `report_channel` (which report tools the run held: `none`, `emit`, `edit`, or `both`), `skill_origin` (`canonical` or `custom`), `github_guidance` (whether the run got the GitHub evidence section), and `business_knowledge_maintained` (whether the run got the business-knowledge section: the product flag is on and the team's knowledge base looks maintained) — the provenance set that says which instructions the run actually got, so runs are only compared against runs of the same shape. Present only when the run departed from a default: `model`, `runtime_adapter`, and `reasoning_effort` (routing overrode the agent-server default), `network_access` (`full` when the scout's config lifted the trusted-domain network restriction for this run), `write_scopes` (the extra write access the run's token carried, when the scout was granted any), `report_actions` (the report actions the run could start, when the scout was granted any), `report_action_starts` (each report action the run started, with `at`, `report_id`, and `action`), and `triggered_by` (`manual` or `workflow` when the run was fired off-schedule; absent means the run came from the coordinator's schedule). The nested `derived` object is the harness's own map of boolean run dimensions, computed server-side at finalize: `has_emit_report`, `has_edit_report`, `has_self_improvement`, `has_chart`, `has_self_validation`, `has_structured_output`, and `has_not_in_use_closeout` (the run wrote a `not-in-use:` scratchpad entry and produced no report, finding, or structured output). Use `derived` to answer 'what kind of run was this?' instead of parsing the `summary` prose. Note the flags describe the reports the run authored as they stand now, so charts attached to someone else's report via an edit are not counted. A missing `derived` object is unknown, not all-false: the run predates the field, never finalized, or its stamp failed. */
       metadata: SignalScoutRunSummaryMetadata;
     }
 
@@ -140583,6 +140763,25 @@ export namespace Schemas {
      * Optional ISO8601 timestamp, e.g. the trace's capture time. When a branch name has been reused across PRs over time, the PR whose lifetime window contains this moment is ranked first so the result matches the PR that was active when the trace was captured. A preference only, not a filter; omit to rank purely by open state then recency.
      */
     timestamp?: string;
+    };
+
+    export type EngineeringAnalyticsRevertOutcomesParams = {
+    /**
+     * Window start: relative ('-30d', '-8w') or ISO8601. Defaults to -30d.
+     */
+    date_from?: string;
+    /**
+     * Window end: relative or ISO8601. Defaults to now.
+     */
+    date_to?: string;
+    /**
+     * 'owner/name' repository to scope to when the selected source syncs several repositories (from the `sources` list). Defaults to the source's first repository.
+     */
+    repo?: string;
+    /**
+     * Connected GitHub data warehouse source to read from. Defaults to the oldest connected GitHub source that the `sources` list reports as synced, when the team has more than one.
+     */
+    source_id?: string;
     };
 
     export type EngineeringAnalyticsRunFailureLogsParams = {
