@@ -18,7 +18,7 @@ subscriptions facade, which loads the exports facade, and the exports facade imp
 """
 
 import re
-from collections.abc import Callable, Collection, Iterator, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 from django.db.models import Exists, OuterRef, Prefetch, QuerySet
 from django.utils.timezone import now
 
+from posthog.caching.insight_result import InsightResult
 from posthog.helpers.full_text_search import to_search_results
 from posthog.models.user import User
 from posthog.models.user_home_settings import UserHomeSettings
@@ -46,6 +47,7 @@ from products.dashboards.backend.facade.contracts import (
     DashboardRef,
     DashboardSummary,
     DashboardTemplateDefinition,
+    Frame,
     InsightPlacement,
     MembershipChange,
     PlacedInsightTile,
@@ -54,6 +56,7 @@ from products.dashboards.backend.facade.contracts import (
 )
 from products.dashboards.backend.facade.enums import DashboardCreationMode, DashboardUsageCount
 from products.dashboards.backend.logic import (
+    frames as frames_logic,
     search as search_logic,
     team_settings as team_settings_logic,
     templates as templates_logic,
@@ -1129,3 +1132,8 @@ def read_cached_tiles(
         serialize_tile=serialize_tile,
         context=context,
     )
+
+
+def insight_frames(query: Mapping[str, Any], result: InsightResult) -> list[Frame] | None:
+    """Chart-ready frames for a cached insight result, or None when its query kind or display has none yet."""
+    return frames_logic.insight_frames(query, result)
