@@ -37,6 +37,7 @@ from products.messaging.backend.presentation.views.message_templates import (
 )
 from products.messaging.backend.services.transactional_email import (
     BATCH_SANDBOX_SENDER_WARNING,
+    SANDBOX_SENDER_WARNING,
     TRANSACTIONAL_EMAIL_KEY_LIMIT,
     make_transactional,
 )
@@ -554,7 +555,7 @@ class TestTransactionalEmailBatch(APIBaseTest):
         assert "results" not in response.json()
         assert (response.json() == single.json()) == as_single_send
         if pipeline_code == "sandbox_fields_unsupported":
-            assert "sandbox sender" in response.json()["detail"]
+            assert "PostHog test sender" in response.json()["detail"]
         assert [
             (call.kwargs["properties"]["outcome"], call.kwargs["properties"]["error_code"])
             for call in capture.call_args_list
@@ -763,7 +764,8 @@ class TestTransactionalEmailBatch(APIBaseTest):
         if single.status_code == status.HTTP_202_ACCEPTED:
             assert batch.status_code == status.HTTP_200_OK, batch.json()
             assert batch.json()["warnings"] == [
-                {**warning, "message": BATCH_SANDBOX_SENDER_WARNING} for warning in single.json()["warnings"]
+                {**warning, "message": warning["message"].replace(SANDBOX_SENDER_WARNING, BATCH_SANDBOX_SENDER_WARNING)}
+                for warning in single.json()["warnings"]
             ]
             (batch_call,) = mock_post.call_args_list
             assert _forwarded(batch_call)["send"] == single_send

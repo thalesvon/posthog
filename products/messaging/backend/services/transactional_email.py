@@ -194,9 +194,8 @@ def _observe_cdp_call(seconds: float) -> None:
 
 
 SANDBOX_FIELDS_UNSUPPORTED = (
-    "This project has no verified sending domain, so this email would go out from PostHog's sandbox sender, which "
-    "can't send `cc`, `bcc`, `reply_to`, `attachments` or a custom `from`. Remove those fields, or verify a sending "
-    "domain at {setup_url}."
+    "This project has no verified sending domain, so this email would go out from the PostHog test sender, which "
+    "can't send `cc`, `bcc` or `attachments`. Remove those fields, or verify a sending domain at {setup_url}."
 )
 
 # The CDP service names the reason it refused a send in the body's `error`. A retry of the same request gets the
@@ -238,13 +237,13 @@ PIPELINE_REFUSALS: dict[str, tuple[type[TransactionalEmailError], str]] = {
     ),
     "sandbox_recipient_not_member": (
         SandboxRecipientNotMember,
-        "PostHog's sandbox sender only sends to members of your organization until this project verifies a sending "
+        "The PostHog test sender only sends to members of your organization until this project verifies a sending "
         "domain, so this email wasn't sent. Verify a sending domain at {setup_url} to send to anyone.",
     ),
     "sandbox_fields_unsupported": (SandboxFieldsUnsupported, SANDBOX_FIELDS_UNSUPPORTED),
     "sandbox_sender_unavailable": (
         SandboxSenderNotAvailable,
-        "The sandbox sender isn't available for this organization, so this email wasn't sent. Verify a sending "
+        "The PostHog test sender isn't available for this organization, so this email wasn't sent. Verify a sending "
         "domain at {setup_url} to send email.",
     ),
     "batch_unavailable": (
@@ -272,14 +271,14 @@ BATCH_INVALID_RECIPIENT = (
 
 SANDBOX_SENDER_KIND = "email_sandbox"
 SANDBOX_SENDER_WARNING = (
-    "This email went out from PostHog's sandbox sender, because this project has no verified sending domain. The "
-    "sandbox sender only sends to members of your organization. Verify a sending domain to send to anyone from your "
-    "own address."
+    "This email went out from the PostHog test sender, because this project has no verified sending domain. The "
+    "PostHog test sender only sends to members of your organization. Verify a sending domain to send to anyone from "
+    "your own address."
 )
 BATCH_SANDBOX_SENDER_WARNING = (
-    "PostHog accepted these emails from its sandbox sender, because this project has no verified sending domain. The "
-    "sandbox sender only sends to members of your organization. Verify a sending domain to send to anyone from your "
-    "own address."
+    "PostHog accepted these emails to send from the PostHog test sender, because this project has no verified "
+    "sending domain. The PostHog test sender only sends to members of your organization. Verify a sending domain to "
+    "send to anyone from your own address."
 )
 
 FILES_REFUSALS: dict[str, tuple[str, str, str]] = {
@@ -735,10 +734,15 @@ def send_code_email_batch(team: Team, email: CodeEmail, recipients: Sequence[Bat
             )
         )
     with transactional_email_stage("workflow_lookup"):
-        accepted_send = _accepted_send(team, email)[0]
+        accepted_send, fallback_warning = _accepted_send(team, email)
         hog_flow_id = _code_template_workflow_id(team.id, email) or _key_workflow_id(team.id, email.key)
     return _queue_batch(
-        team.id, hog_flow_id, {"send": accepted_send}, recipients, send_accepted_transactional_email_batch
+        team.id,
+        hog_flow_id,
+        {"send": accepted_send},
+        recipients,
+        send_accepted_transactional_email_batch,
+        sandbox_ignored=_fields_the_sandbox_ignores(email) if fallback_warning is not None else (),
     )
 
 
@@ -805,7 +809,7 @@ def _accepted_send(team: Team, email: CodeEmail) -> tuple[dict[str, Any], SendWa
     }
     if email.sensitive is not None:
         accepted["sensitive"] = email.sensitive
-    if email.reply_to:
+    if email.reply_to and sandbox_warning is None:
         accepted["replyTo"] = list(email.reply_to)
     if email.cc:
         accepted["cc"] = list(email.cc)
@@ -865,19 +869,19 @@ def _code_send_sender(
             return {}, None
         sandbox_sender_id = provision_sandbox_sender(team, None).id
         logger.info("transactional_email_sandbox_sender_fallback", team_id=team.id, key=email.key)
-        return {"integrationId": sandbox_sender_id}, _sandbox_sender_warning(team.id)
+        return {"integrationId": sandbox_sender_id}, _sandbox_sender_warning(
+            team.id, _fields_the_sandbox_ignores(email)
+        )
     return {"integrationId": sender_id, "email": address, "name": name}, None
 
 
 def _field_the_sandbox_sender_cannot_send(email: CodeEmail) -> str | None:
-    fields = {
-        "cc": email.cc,
-        "bcc": email.bcc,
-        "reply_to": email.reply_to,
-        "attachments": email.attachments,
-        "from": email.sender,
-    }
+    fields = {"cc": email.cc, "bcc": email.bcc, "attachments": email.attachments}
     return next((field for field, value in fields.items() if value), None)
+
+
+def _fields_the_sandbox_ignores(email: CodeEmail) -> tuple[str, ...]:
+    return tuple(field for field, value in (("from", email.sender), ("reply_to", email.reply_to)) if value)
 
 
 def _without_empty(fields: dict[str, Any]) -> dict[str, Any]:
@@ -961,6 +965,7 @@ def _queue(
         replayed=replayed,
         attachment_bytes=_attachment_bytes(answer),
         warnings=(sandbox_warning,) if sandbox_warning and sent_from_sandbox else (),
+        sent_from_sandbox=sent_from_sandbox or (sandbox_warning is not None and not replayed),
     )
 
 
@@ -970,10 +975,12 @@ def _queue_batch(
     shared: dict[str, Any],
     recipients: Sequence[BatchRecipient],
     post: _PipelinePost,
+    *,
+    sandbox_ignored: tuple[str, ...] = (),
 ) -> EmailBatchSent:
     sent = [recipient for recipient in recipients if recipient.refusal is None]
     payload = {**shared, "recipients": [_batch_recipient_payload(recipient) for recipient in sent]}
-    answers = iter(_batch_answers(team_id, hog_flow_id, payload, sent, post) if sent else ())
+    answers = iter(_batch_answers(team_id, hog_flow_id, payload, sent, post, sandbox_ignored) if sent else ())
     results = tuple(
         _refused_recipient(team_id, recipient, recipient.refusal) if recipient.refusal is not None else next(answers)
         for recipient in recipients
@@ -1001,6 +1008,7 @@ def _batch_answers(
     payload: dict[str, Any],
     recipients: Sequence[BatchRecipient],
     post: _PipelinePost,
+    sandbox_ignored: tuple[str, ...],
 ) -> tuple[QueuedEmail | EmailNotQueued, ...]:
     started_at = time.monotonic()
     try:
@@ -1012,7 +1020,7 @@ def _batch_answers(
         raise DeliveryUnavailable() from e
     CDP_BATCH_DURATION.observe(time.monotonic() - started_at)
     answer = _answer(response)
-    results = _read_batch_answer(team_id, recipients, answer) if response.status_code == 200 else None
+    results = _read_batch_answer(team_id, recipients, answer, sandbox_ignored) if response.status_code == 200 else None
     if results is not None:
         CDP_BATCH_RESULTS.labels(result="success").inc()
         return results
@@ -1041,12 +1049,14 @@ def _batch_answers(
 
 
 def _read_batch_answer(
-    team_id: int, recipients: Sequence[BatchRecipient], answer: dict[str, Any]
+    team_id: int, recipients: Sequence[BatchRecipient], answer: dict[str, Any], sandbox_ignored: tuple[str, ...]
 ) -> tuple[QueuedEmail | EmailNotQueued, ...] | None:
     answered = answer.get("results")
     if not isinstance(answered, list) or len(answered) != len(recipients):
         return None
-    sandbox_warning = cache(lambda: _sandbox_sender_warning(team_id, BATCH_SANDBOX_SENDER_WARNING))
+    sandbox_warning = cache(
+        lambda: _sandbox_sender_warning(team_id, sandbox_ignored, message=BATCH_SANDBOX_SENDER_WARNING)
+    )
     setup_url = cache(lambda: sending_domain_setup(team_id).setup_url)
     results: list[QueuedEmail | EmailNotQueued] = []
     for recipient, result in zip(recipients, answered):
@@ -1148,7 +1158,9 @@ def _explanation(answer: dict[str, Any], key: str) -> str | None:
     return value if isinstance(value, str) and value.strip() else None
 
 
-def _sandbox_sender_warning(team_id: int, message: str = SANDBOX_SENDER_WARNING) -> SendWarning:
+def _sandbox_sender_warning(
+    team_id: int, ignored: tuple[str, ...] = (), message: str = SANDBOX_SENDER_WARNING
+) -> SendWarning:
     setup = sending_domain_setup(team_id)
     if setup.unverified_sender_id is None:
         agent_action = (
@@ -1163,6 +1175,11 @@ def _sandbox_sender_warning(team_id: int, message: str = SANDBOX_SENDER_WARNING)
             f"integrations-email-status-retrieve for integration {setup.unverified_sender_id} to get the DNS records "
             "to publish."
         )
+    if ignored:
+        names = " and ".join(f"`{field}`" for field in ignored)
+        ignored_note = f" PostHog ignored {names}, because the PostHog test sender only sends from its own address."
+        message += ignored_note
+        agent_action += ignored_note
     return SendWarning(
         code=SendWarningCode.SANDBOX_SENDER,
         message=message,
