@@ -1,6 +1,9 @@
 import { EventEmitter } from 'events'
 import { Counter, Histogram } from 'prom-client'
+import { Readable } from 'stream'
 import { z } from 'zod'
+
+import { parseJSON } from '~/common/utils/json-parse'
 
 import { BatchSendSchema, TransactionalEmailOutcome, TransactionalEmailRequestSchema } from './transactional-email'
 
@@ -122,36 +125,50 @@ export class BatchCapacity {
     }
 }
 
-export type BodyRead = 'parsed' | 'too_large' | 'invalid_request' | 'abandoned' | 'deadline_exceeded'
+export const BATCH_BODY_LIMIT_BYTES = 20 * 1024 * 1024
 
-// The parser calls back once per chunk past its size limit and again at the end of the body, and never when the
-// caller leaves, so the first of these ends the read and frees the request's admission from a late callback.
+export type BodyRead =
+    | { read: 'parsed'; body: unknown }
+    | { read: 'too_large' | 'invalid_request' | 'abandoned' | 'deadline_exceeded' }
+
+// The route reads the body itself, not through ultimate-express's JSON parser, because nothing can stop that parser
+// once it has started: it would keep buffering and parsing after the deadline freed the batch's admission. The server
+// delivers exactly the declared length, so the declared length bounds the read.
 export const readBatchBody = (
-    parse: (done: (error?: unknown) => void) => void,
-    { connection, deadline }: { connection: EventEmitter | null; deadline: AbortSignal }
+    body: Readable,
+    { length, connection, deadline }: { length: number; connection: EventEmitter | null; deadline: AbortSignal }
 ): Promise<BodyRead> =>
     new Promise((resolve) => {
+        if (length > BATCH_BODY_LIMIT_BYTES) {
+            return resolve({ read: 'too_large' })
+        }
+        if (deadline.aborted) {
+            return resolve({ read: 'deadline_exceeded' })
+        }
+        const chunks: Buffer[] = []
         const end = (read: BodyRead): void => {
+            body.off('data', received)
+            body.off('end', ended)
             connection?.off('close', abandoned)
             deadline.removeEventListener('abort', expired)
             resolve(read)
         }
-        const abandoned = (): void => end('abandoned')
-        const expired = (): void => end('deadline_exceeded')
-        if (deadline.aborted) {
-            return end('deadline_exceeded')
+        const received = (chunk: Buffer): void => {
+            chunks.push(chunk)
         }
+        const ended = (): void => {
+            try {
+                end({ read: 'parsed', body: parseJSON(Buffer.concat(chunks).toString('utf8')) })
+            } catch {
+                end({ read: 'invalid_request' })
+            }
+        }
+        const abandoned = (): void => end({ read: 'abandoned' })
+        const expired = (): void => end({ read: 'deadline_exceeded' })
         connection?.once('close', abandoned)
         deadline.addEventListener('abort', expired, { once: true })
-        parse((error) =>
-            end(
-                !error
-                    ? 'parsed'
-                    : error instanceof Error && error.message === 'Request entity too large'
-                      ? 'too_large'
-                      : 'invalid_request'
-            )
-        )
+        body.on('data', received)
+        body.on('end', ended)
     })
 
 // The work keeps running past the deadline, so its later failure must not go unhandled.

@@ -428,9 +428,6 @@ export class CdpApi {
     private manageTransactionalEmailJwt: ScopedServiceJwt
     private transactionalEmailBatchCapacity: BatchCapacity
     private transactionalEmailBatchDeadlineMs: number
-    // ultimate-express inflates a compressed body in a socket callback that nothing catches, so a malformed compressed
-    // body would crash the pod. The route refuses an encoded body before this parser reads it.
-    private transactionalEmailBatchBody = express.json({ limit: '20mb', inflate: false })
     private attachmentUploads: AttachmentUploads
     private emailSuppressionService: EmailSuppressionService
     private emailValidationService: EmailValidationService
@@ -1692,29 +1689,25 @@ export class CdpApi {
     ): void => {
         const { release, deadline, arrivedAt } = res.locals.transactionalEmailBatch as BatchAdmission
         const encoding = req.headers['content-encoding']
-        // The parser buffers and parses a body of unknown length past its size limit, so a body must declare its length.
-        // The server refuses a request that declares a length and a transfer encoding together.
-        if (
-            (encoding !== undefined && encoding.trim().toLowerCase() !== 'identity') ||
-            !/^\d+$/.test(req.headers['content-length'] ?? '')
-        ) {
+        const length = req.headers['content-length']
+        // The declared length bounds the read, so a body must declare one. The route does not inflate a body. The server
+        // refuses a request that declares a length and a transfer encoding together.
+        if ((encoding !== undefined && encoding.trim().toLowerCase() !== 'identity') || !/^\d+$/.test(length ?? '')) {
             release()
             transactionalEmailBatchRequestsTotal.inc({ outcome: 'invalid_request' })
             res.status(BODY_READ_REFUSAL_STATUS.invalid_request).json({ error: 'invalid_request' })
             transactionalEmailBatchDurationMs.observe(performance.now() - arrivedAt)
             return
         }
-        void readBatchBody((done) => this.transactionalEmailBatchBody(req, res, done), {
-            connection: res.socket,
-            deadline,
-        }).then((read) => {
-            if (read === 'parsed') {
+        void readBatchBody(req, { length: Number(length), connection: res.socket, deadline }).then((result) => {
+            if (result.read === 'parsed') {
+                req.body = result.body
                 return next()
             }
             release()
-            transactionalEmailBatchRequestsTotal.inc({ outcome: read })
-            if (read !== 'abandoned') {
-                res.status(BODY_READ_REFUSAL_STATUS[read]).json({ error: read })
+            transactionalEmailBatchRequestsTotal.inc({ outcome: result.read })
+            if (result.read !== 'abandoned') {
+                res.status(BODY_READ_REFUSAL_STATUS[result.read]).json({ error: result.read })
                 transactionalEmailBatchDurationMs.observe(performance.now() - arrivedAt)
             }
         })

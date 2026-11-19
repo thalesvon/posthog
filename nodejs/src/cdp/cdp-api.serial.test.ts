@@ -5647,7 +5647,9 @@ describe('CDP API', () => {
                 }
                 const publishedTo = () => intakeRunsOf(intakeRecords()).map(({ distinctId }) => distinctId)
 
+                const uploads: net.Socket[] = []
                 afterEach(async () => {
+                    uploads.splice(0).forEach((socket) => socket.destroy())
                     await Promise.all(
                         served.splice(0).map(({ cdpApi, server }) => {
                             server.close()
@@ -5784,29 +5786,6 @@ describe('CDP API', () => {
                     )
                 })
 
-                it('answers a body still arriving at the deadline, and frees its admission', async () => {
-                    const { app: own, port } = await servedWith({
-                        CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_REQUESTS: 1,
-                        CDP_TRANSACTIONAL_EMAIL_BATCH_DEADLINE_MS: 300,
-                    })
-                    const slow = postRaw(port, { 'Content-Length': '100000' })
-                    const answered = new Promise<{ status: number; body: string }>((resolve) =>
-                        slow.on('response', (response) => {
-                            let body = ''
-                            response.on('data', (chunk) => (body += chunk))
-                            response.on('end', () => resolve({ status: response.statusCode ?? 0, body }))
-                        })
-                    )
-                    slow.write('{"recipients": [')
-
-                    const answer = await answered
-
-                    slow.destroy()
-                    expect(answer.status).toEqual(503)
-                    expect(parseJSON(answer.body)).toEqual({ error: 'deadline_exceeded' })
-                    expect((await sendBatchTo(own, TEMPLATE, batchOf(recipient('cy@example.com')))).status).toEqual(200)
-                })
-
                 it('refuses to start with a deadline that answers after Django gives up', () => {
                     expect(
                         () =>
@@ -5843,18 +5822,20 @@ describe('CDP API', () => {
 
                 const startUpload = (port: number, headers: string[], partial: string) => {
                     const socket = net.connect(port, '127.0.0.1')
-                    socket.on('error', () => {})
+                    uploads.push(socket)
                     let received = ''
-                    socket.on('data', (chunk) => (received += chunk))
-                    const answered = new Promise<{ status: number; body: string }>((resolve) =>
-                        socket.on('data', () => {
+                    const answered = new Promise<{ status: number; body: string }>((resolve, reject) => {
+                        socket.on('data', (chunk) => {
+                            received += chunk
                             const [head, body = ''] = received.split('\r\n\r\n')
                             const length = Number(/content-length: (\d+)/i.exec(head)?.[1])
                             if (Buffer.byteLength(body) >= length) {
                                 resolve({ status: Number(head.split(' ')[1]), body })
                             }
                         })
-                    )
+                        socket.on('error', reject)
+                        socket.on('close', () => reject(new Error(`closed before a full answer: ${received}`)))
+                    })
                     socket.write(
                         [
                             `POST ${pathOf(TEMPLATE)} HTTP/1.1`,
@@ -5938,7 +5919,6 @@ describe('CDP API', () => {
                         socket.write(upload.rest)
                         await waitForExpect(() => expect(requests[0].readableEnded).toBe(true))
                         const after = await sendBatchTo(own, TEMPLATE, batchOf(recipient('bo@example.com')))
-                        socket.destroy()
 
                         expect(answer.status).toEqual(status)
                         expect(answer.body).toContain(error)
@@ -5946,6 +5926,35 @@ describe('CDP API', () => {
                         expect(publishedTo()).not.toContain('person-ada@example.com')
                     }
                 )
+
+                it('refuses a body still arriving at its deadline, sends nothing once it arrives, and frees its admission', async () => {
+                    const {
+                        app: own,
+                        port,
+                        requests,
+                    } = await servedWith({
+                        CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_REQUESTS: 1,
+                        CDP_TRANSACTIONAL_EMAIL_BATCH_DEADLINE_MS: 300,
+                    })
+                    const late = JSON.stringify(batchOf(recipient('late@example.com')))
+                    const { socket, answered } = startUpload(
+                        port,
+                        [
+                            `Authorization: ${authorizationFor('template_batch')}`,
+                            `Content-Length: ${Buffer.byteLength(late)}`,
+                        ],
+                        late.slice(0, 20)
+                    )
+
+                    const answer = await answered
+                    socket.write(late.slice(20))
+                    await waitForExpect(() => expect(requests[0].readableEnded).toBe(true))
+                    const after = await sendBatchTo(own, TEMPLATE, batchOf(recipient('cy@example.com')))
+
+                    expect([answer.status, parseJSON(answer.body)]).toEqual([503, { error: 'deadline_exceeded' }])
+                    expect(after.status).toEqual(200)
+                    expect(publishedTo()).toEqual(['person-cy@example.com'])
+                })
 
                 it.each([
                     [TEMPLATE, 200],
