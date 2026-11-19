@@ -41,7 +41,9 @@ from products.workflows.backend.facade.team_extension import TeamWorkflowsConfig
 
 BATCH_URL = "/api/messaging/send/email_batch/"
 SINGLE_URL = "/api/messaging/send/email/"
-ACCEPTED = {"status": 202, "body": {"invocation_id": "invocation-1"}}
+MESSAGE_ID = "0196a8f0-0000-7000-8000-000000000001"
+SECOND_MESSAGE_ID = "0196a8f0-0000-7000-8000-000000000002"
+ACCEPTED = {"status": 202, "body": {"invocation_id": MESSAGE_ID, "replayed": False}}
 RECIPIENT = {"to": "a@example.com", "idempotency_key": "key-a"}
 
 PIPELINE_STATUSES = {
@@ -154,7 +156,9 @@ class TestTransactionalEmailBatch(APIBaseTest):
         merged_data = {"message_data": {"link": "https://example.com/a", "n": 2}} if form == "template" else {}
         assert self._single(form, distinct_id="user-0", **merged_data).status_code == status.HTTP_202_ACCEPTED
         single = _forwarded(mock_post.call_args)
-        mock_post.return_value = _batch_answer(ACCEPTED, {"status": 202, "body": {"invocation_id": "i-2"}})
+        mock_post.return_value = _batch_answer(
+            ACCEPTED, {"status": 202, "body": {"invocation_id": SECOND_MESSAGE_ID, "replayed": False}}
+        )
         first_recipient: dict[str, Any] = {
             "to": "user0@example.com",
             "distinct_id": "user-0",
@@ -168,8 +172,8 @@ class TestTransactionalEmailBatch(APIBaseTest):
         assert response.status_code == status.HTTP_200_OK, response.json()
         assert response.json() == {
             "results": [
-                {"message_id": "invocation-1", "status": "queued", "replayed": False},
-                {"message_id": "i-2", "status": "queued", "replayed": False},
+                {"message_id": MESSAGE_ID, "status": "queued", "replayed": False},
+                {"message_id": SECOND_MESSAGE_ID, "status": "queued", "replayed": False},
             ]
         }
         url, forwarded = mock_post.call_args.args[0], _forwarded(mock_post.call_args)
@@ -240,7 +244,7 @@ class TestTransactionalEmailBatch(APIBaseTest):
             False,
         )
         assert "{ or }" in refused["error"]["detail"]
-        assert queued == {"message_id": "invocation-1", "status": "queued", "replayed": False}
+        assert queued == {"message_id": MESSAGE_ID, "status": "queued", "replayed": False}
         assert malformed["error"]["code"] == "invalid_recipient"
         assert unencodable["error"]["code"] == "invalid_recipient"
         assert [recipient["to"] for recipient in _forwarded(mock_post.call_args)["recipients"]] == ["user1@example.com"]
@@ -286,6 +290,17 @@ class TestTransactionalEmailBatch(APIBaseTest):
             ("shared_scheduled_at", "code", {"scheduled_at": "2030-01-01T00:00:00Z"}, 400, "scheduled_at"),
             ("shared_to", "template", {"to": "a@example.com"}, 400, "to"),
             ("shared_distinct_id", "code", {"distinct_id": "person-1"}, 400, "distinct_id"),
+            ("shared_legacy_identifiers", "template", {"identifiers": {"distinct_id": "person-1"}}, 400, "identifiers"),
+            (
+                "unverified_sender_and_no_recipient_it_can_address",
+                "code",
+                {
+                    "from": "Example <hello@unverified.example>",
+                    "recipients": [{"to": "not an address", "idempotency_key": "k"}],
+                },
+                400,
+                "from",
+            ),
             (
                 "recipient_unknown_field",
                 "template",
@@ -418,26 +433,25 @@ class TestTransactionalEmailBatch(APIBaseTest):
             hog_flow_id = self.hog_flow_id
         self._archive(hog_flow_id)
         mock_post.return_value = _batch_answer(
-            {"status": 202, "body": {"invocation_id": "first-send", "replayed": True}},
+            {"status": 202, "body": {"invocation_id": MESSAGE_ID, "replayed": True}},
             {"status": 400, "body": {"error": "not_sendable"}},
             {"status": 503, "body": {"error": "not_attempted"}},
+            {"status": 503, "body": {"error": "delivery_unavailable", "may_still_go_out": False}},
         )
 
-        response = self._batch(form, self._recipients(3))
+        response = self._batch(form, self._recipients(4))
 
         assert response.status_code == status.HTTP_200_OK, response.json()
-        replayed, refused, unstarted = response.json()["results"]
-        assert replayed == {"message_id": "first-send", "status": "queued", "replayed": True}
+        replayed, refused, *unstarted = response.json()["results"]
+        assert replayed == {"message_id": MESSAGE_ID, "status": "queued", "replayed": True}
         assert {name: refused["error"][name] for name in ("code", "status", "retryable")} == {
             "code": "transactional_email_paused",
             "status": 400,
             "retryable": False,
         }
-        assert {name: unstarted["error"][name] for name in ("code", "status", "retryable")} == {
-            "code": "not_attempted",
-            "status": 503,
-            "retryable": True,
-        }
+        assert [{name: result["error"][name] for name in ("code", "status", "retryable")} for result in unstarted] == [
+            {"code": "not_attempted", "status": 503, "retryable": True}
+        ] * 2
         assert f"/hog_flows/{hog_flow_id}/" in mock_post.call_args.args[0]
 
     @parameterized.expand(PIPELINE_ANSWERS)
@@ -463,17 +477,41 @@ class TestTransactionalEmailBatch(APIBaseTest):
             ("an_answer_without_a_status", {"return_value": _batch_answer(ACCEPTED, {"body": {}})}),
             (
                 "an_answer_with_an_empty_invocation_id",
-                {"return_value": _batch_answer(ACCEPTED, {"status": 202, "body": {"invocation_id": ""}})},
+                {
+                    "return_value": _batch_answer(
+                        ACCEPTED, {"status": 202, "body": {"invocation_id": "", "replayed": False}}
+                    )
+                },
+            ),
+            (
+                "an_answer_with_an_invocation_id_that_is_not_a_uuid",
+                {
+                    "return_value": _batch_answer(
+                        ACCEPTED, {"status": 202, "body": {"invocation_id": "not-a-uuid", "replayed": False}}
+                    )
+                },
+            ),
+            (
+                "an_answer_without_a_replay_marker",
+                {
+                    "return_value": _batch_answer(
+                        ACCEPTED, {"status": 202, "body": {"invocation_id": SECOND_MESSAGE_ID}}
+                    )
+                },
             ),
             (
                 "an_answer_with_an_invocation_id_that_is_not_valid_unicode",
-                {"return_value": _batch_answer(ACCEPTED, {"status": 202, "body": {"invocation_id": "\ud800"}})},
+                {
+                    "return_value": _batch_answer(
+                        ACCEPTED, {"status": 202, "body": {"invocation_id": "\ud800", "replayed": False}}
+                    )
+                },
             ),
             (
                 "an_answer_with_a_replay_marker_that_is_not_a_bool",
                 {
                     "return_value": _batch_answer(
-                        ACCEPTED, {"status": 202, "body": {"invocation_id": "i-2", "replayed": "no"}}
+                        ACCEPTED, {"status": 202, "body": {"invocation_id": SECOND_MESSAGE_ID, "replayed": "no"}}
                     )
                 },
             ),
@@ -548,7 +586,7 @@ class TestTransactionalEmailBatch(APIBaseTest):
     ):
         Integration.objects.filter(id=self.sender.id).delete()
         TeamWorkflowsConfig.objects.filter(team_id=self.team.id).update(default_email_integration_id=None)
-        sandbox_send = {"invocation_id": "sandbox-1", "sender_kind": "email_sandbox"}
+        sandbox_send = {"invocation_id": MESSAGE_ID, "replayed": False, "sender_kind": "email_sandbox"}
         mock_post.return_value = MagicMock(status_code=202, json=lambda: sandbox_send)
         single = self._single("code", **sender)
         single_send = _forwarded(mock_post.call_args)["send"] if mock_post.called else None

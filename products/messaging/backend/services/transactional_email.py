@@ -685,11 +685,12 @@ def send_email_batch(
 
 
 def send_code_email_batch(team: Team, email: CodeEmail, recipients: Sequence[BatchRecipient]) -> EmailBatchSent:
+    with transactional_email_stage("workflow_lookup"):
+        accepted_send, sandbox_warning = _accepted_send(team, email)
     refusals = tuple(recipient.refusal for recipient in recipients if recipient.refusal is not None)
     if len(refusals) == len(recipients):
         return EmailBatchSent(results=refusals)
     with transactional_email_stage("workflow_lookup"):
-        accepted_send, sandbox_warning = _accepted_send(team, email)
         hog_flow_id = _code_email_workflow_id(team.id, email.key, email.sensitive, require_active=False)
     return _queue_batch(
         team.id,
@@ -1006,20 +1007,20 @@ def _batch_answer_list(answer: dict[str, Any], expected: int) -> list[tuple[int,
         status_code, body = (result.get("status"), result.get("body")) if isinstance(result, dict) else (None, None)
         if not isinstance(status_code, int) or isinstance(status_code, bool) or not isinstance(body, dict):
             return None
-        if status_code == 202 and not _is_message_id(body.get("invocation_id")):
-            return None
-        if not isinstance(body.get("replayed", False), bool):
+        if status_code == 202 and not (
+            _is_message_id(body.get("invocation_id")) and isinstance(body.get("replayed"), bool)
+        ):
             return None
         answers.append((status_code, body))
     return answers
 
 
 def _is_message_id(value: Any) -> bool:
-    if not isinstance(value, str) or not value:
+    if not isinstance(value, str):
         return False
     try:
-        value.encode()
-    except UnicodeEncodeError:
+        UUID(value)
+    except ValueError:
         return False
     return True
 
@@ -1028,7 +1029,7 @@ def _batch_result(
     team_id: int, hog_flow_id: UUID, answer: tuple[int, dict[str, Any]], sandbox_warning: SendWarning | None
 ) -> QueuedEmail | TransactionalEmailError | DeliveryUnavailable:
     status_code, body = answer
-    if status_code == 503 and _refusal_code(body) == "not_attempted":
+    if status_code == 503 and (_refusal_code(body) == "not_attempted" or body.get("may_still_go_out") is False):
         return SendNotAttempted()
     try:
         return _queued_email(

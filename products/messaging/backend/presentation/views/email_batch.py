@@ -34,6 +34,7 @@ BATCH_MAX_RECIPIENTS = 100
 BATCH_BODY_MAX_BYTES = 5 * 1024 * 1024
 BATCH_REFUSED_FIELDS = ("scheduled_at", *CODE_SEND_EXTRA_FIELDS)
 FIELDS_THAT_FAIL_ONE_RECIPIENT = frozenset({"to", "distinct_id"})
+RECIPIENT_FIELDS_OUTSIDE_RECIPIENTS = {"to": "to", "distinct_id": "distinct_id", "identifiers": "distinct_id"}
 RECIPIENT_FIELDS = frozenset({"to", "distinct_id", "message_data", "idempotency_key"})
 RETRYABLE_CODES = frozenset({"idempotency_key_in_flight", "quota_limited", "delivery_unavailable", "not_attempted"})
 UNCONFIRMED_EMAIL = (
@@ -201,13 +202,13 @@ def refused_batch_field(data: Any, *, takes_template_key: bool) -> ExplainedRefu
         return None
     if field := next((field for field in BATCH_REFUSED_FIELDS if field in data), None):
         return _field_refusal(field)
-    if field := next((field for field in FIELDS_THAT_FAIL_ONE_RECIPIENT if field in data), None):
+    if field := next((field for field in RECIPIENT_FIELDS_OUTSIDE_RECIPIENTS if field in data), None):
         return ExplainedRefusal(
             f"A batch send names each recipient in `recipients`, so it doesn't take `{field}` outside them.",
             code="field_not_accepted",
             attr=field,
             why="Each recipient of a batch gets its own email, addressed by its own entry in `recipients`.",
-            fix=f"Move `{field}` into each entry of `recipients`.",
+            fix=f"Move `{RECIPIENT_FIELDS_OUTSIDE_RECIPIENTS[field]}` into each entry of `recipients`.",
         )
     recipients = data.get("recipients")
     if not isinstance(recipients, list) or len(recipients) > BATCH_MAX_RECIPIENTS:
