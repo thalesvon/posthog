@@ -21,6 +21,7 @@ from posthog.plugins.plugin_server_api import WORKFLOWS_TRANSACTIONAL_EMAIL_JWT_
 
 from products.messaging.backend.models.message_template import MessageTemplate
 from products.messaging.backend.models.transactional_email_key import TransactionalEmailKey
+from products.messaging.backend.presentation.views.email_batch import BATCH_REFUSED_FIELDS, SendEmailBatchSerializer
 from products.messaging.backend.presentation.views.message_templates import (
     EMAIL_BATCH_FLAG,
     EMAIL_FROM_CODE_FLAG,
@@ -314,6 +315,12 @@ class TestTransactionalEmailBatch(APIBaseTest):
 
         assert response.status_code == status.HTTP_200_OK, response.json()
         assert [result["status"] for result in response.json()["results"]] == ["queued"] * count
+
+    def test_publishes_no_field_a_batch_refuses(self, _mock_post, _flag, _capture):
+        published = set(SendEmailBatchSerializer().fields)
+
+        assert published.isdisjoint(BATCH_REFUSED_FIELDS)
+        assert "recipients" in published
 
     def _form_encoded_batch(self) -> Any:
         return self.psak.post(

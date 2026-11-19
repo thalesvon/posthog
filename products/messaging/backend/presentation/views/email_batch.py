@@ -128,8 +128,8 @@ class SendEmailBatchSerializer(SendEmailSerializer):
 
     def get_fields(self) -> dict[str, serializers.Field]:
         fields = super().get_fields()
-        for name in ("to", "distinct_id", *CODE_SEND_EXTRA_FIELDS):
-            fields.pop(name)
+        for name in ("to", "distinct_id", *BATCH_REFUSED_FIELDS):
+            fields.pop(name, None)
         return fields
 
 
