@@ -55,6 +55,12 @@ export const BatchExportsCreateBody = /* @__PURE__ */ zod
                             ),
                         config: zod
                             .object({
+                                use_new_events_schema: zod
+                                    .boolean()
+                                    .optional()
+                                    .describe(
+                                        'Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move.'
+                                    ),
                                 http_path: zod.string().describe('Databricks SQL warehouse HTTP path.'),
                                 catalog: zod.string().describe('Unity Catalog name.'),
                                 schema: zod.string().describe('Schema (database) name inside the catalog.'),
@@ -88,6 +94,12 @@ export const BatchExportsCreateBody = /* @__PURE__ */ zod
                             ),
                         config: zod
                             .object({
+                                use_new_events_schema: zod
+                                    .boolean()
+                                    .optional()
+                                    .describe(
+                                        'Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move.'
+                                    ),
                                 container_name: zod.string().describe('Azure Blob Storage container name.'),
                                 prefix: zod
                                     .string()
@@ -142,6 +154,12 @@ export const BatchExportsCreateBody = /* @__PURE__ */ zod
                             ),
                         config: zod
                             .object({
+                                use_new_events_schema: zod
+                                    .boolean()
+                                    .optional()
+                                    .describe(
+                                        'Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move.'
+                                    ),
                                 dataset_id: zod.string().describe('BigQuery dataset ID to write to.'),
                                 table_id: zod
                                     .string()
@@ -170,6 +188,12 @@ export const BatchExportsCreateBody = /* @__PURE__ */ zod
                             ),
                         config: zod
                             .object({
+                                use_new_events_schema: zod
+                                    .boolean()
+                                    .optional()
+                                    .describe(
+                                        'Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move.'
+                                    ),
                                 database: zod.string().describe('PostgreSQL database name to connect to.'),
                                 schema: zod
                                     .string()
@@ -202,6 +226,12 @@ export const BatchExportsCreateBody = /* @__PURE__ */ zod
                             ),
                         config: zod
                             .object({
+                                use_new_events_schema: zod
+                                    .boolean()
+                                    .optional()
+                                    .describe(
+                                        'Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move.'
+                                    ),
                                 bucket_name: zod.string().describe('Name of the destination bucket.'),
                                 region: zod.string().describe("Region the bucket is in (e.g. 'us-east-1')."),
                                 prefix: zod.string().describe('Object key prefix applied to every exported file.'),
@@ -264,6 +294,12 @@ export const BatchExportsCreateBody = /* @__PURE__ */ zod
                             ),
                         config: zod
                             .object({
+                                use_new_events_schema: zod
+                                    .boolean()
+                                    .optional()
+                                    .describe(
+                                        'Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move.'
+                                    ),
                                 bucket_name: zod.string().describe('Name of the destination bucket.'),
                                 region: zod.string().describe("Region the bucket is in (e.g. 'us-east-1')."),
                                 prefix: zod.string().describe('Object key prefix applied to every exported file.'),
@@ -322,6 +358,12 @@ export const BatchExportsCreateBody = /* @__PURE__ */ zod
                             ),
                         config: zod
                             .object({
+                                use_new_events_schema: zod
+                                    .boolean()
+                                    .optional()
+                                    .describe(
+                                        'Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move.'
+                                    ),
                                 database: zod.string().describe('Snowflake database to write to.'),
                                 warehouse: zod.string().describe('Snowflake compute warehouse to use.'),
                                 schema: zod
@@ -352,6 +394,12 @@ export const BatchExportsCreateBody = /* @__PURE__ */ zod
                             ),
                         config: zod
                             .object({
+                                use_new_events_schema: zod
+                                    .boolean()
+                                    .optional()
+                                    .describe(
+                                        'Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move.'
+                                    ),
                                 database: zod.string().describe('Redshift database name to connect to.'),
                                 host: zod
                                     .string()
@@ -1029,6 +1077,12 @@ export const BatchExportsUpdateBody = /* @__PURE__ */ zod
                             ),
                         config: zod
                             .object({
+                                use_new_events_schema: zod
+                                    .boolean()
+                                    .optional()
+                                    .describe(
+                                        'Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move.'
+                                    ),
                                 http_path: zod.string().describe('Databricks SQL warehouse HTTP path.'),
                                 catalog: zod.string().describe('Unity Catalog name.'),
                                 schema: zod.string().describe('Schema (database) name inside the catalog.'),
@@ -1062,6 +1116,12 @@ export const BatchExportsUpdateBody = /* @__PURE__ */ zod
                             ),
                         config: zod
                             .object({
+                                use_new_events_schema: zod
+                                    .boolean()
+                                    .optional()
+                                    .describe(
+                                        'Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move.'
+                                    ),
                                 container_name: zod.string().describe('Azure Blob Storage container name.'),
                                 prefix: zod
                                     .string()
@@ -1116,6 +1176,12 @@ export const BatchExportsUpdateBody = /* @__PURE__ */ zod
                             ),
                         config: zod
                             .object({
+                                use_new_events_schema: zod
+                                    .boolean()
+                                    .optional()
+                                    .describe(
+                                        'Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move.'
+                                    ),
                                 dataset_id: zod.string().describe('BigQuery dataset ID to write to.'),
                                 table_id: zod
                                     .string()
@@ -1144,6 +1210,12 @@ export const BatchExportsUpdateBody = /* @__PURE__ */ zod
                             ),
                         config: zod
                             .object({
+                                use_new_events_schema: zod
+                                    .boolean()
+                                    .optional()
+                                    .describe(
+                                        'Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move.'
+                                    ),
                                 database: zod.string().describe('PostgreSQL database name to connect to.'),
                                 schema: zod
                                     .string()
@@ -1176,6 +1248,12 @@ export const BatchExportsUpdateBody = /* @__PURE__ */ zod
                             ),
                         config: zod
                             .object({
+                                use_new_events_schema: zod
+                                    .boolean()
+                                    .optional()
+                                    .describe(
+                                        'Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move.'
+                                    ),
                                 bucket_name: zod.string().describe('Name of the destination bucket.'),
                                 region: zod.string().describe("Region the bucket is in (e.g. 'us-east-1')."),
                                 prefix: zod.string().describe('Object key prefix applied to every exported file.'),
@@ -1238,6 +1316,12 @@ export const BatchExportsUpdateBody = /* @__PURE__ */ zod
                             ),
                         config: zod
                             .object({
+                                use_new_events_schema: zod
+                                    .boolean()
+                                    .optional()
+                                    .describe(
+                                        'Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move.'
+                                    ),
                                 bucket_name: zod.string().describe('Name of the destination bucket.'),
                                 region: zod.string().describe("Region the bucket is in (e.g. 'us-east-1')."),
                                 prefix: zod.string().describe('Object key prefix applied to every exported file.'),
@@ -1296,6 +1380,12 @@ export const BatchExportsUpdateBody = /* @__PURE__ */ zod
                             ),
                         config: zod
                             .object({
+                                use_new_events_schema: zod
+                                    .boolean()
+                                    .optional()
+                                    .describe(
+                                        'Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move.'
+                                    ),
                                 database: zod.string().describe('Snowflake database to write to.'),
                                 warehouse: zod.string().describe('Snowflake compute warehouse to use.'),
                                 schema: zod
@@ -1326,6 +1416,12 @@ export const BatchExportsUpdateBody = /* @__PURE__ */ zod
                             ),
                         config: zod
                             .object({
+                                use_new_events_schema: zod
+                                    .boolean()
+                                    .optional()
+                                    .describe(
+                                        'Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move.'
+                                    ),
                                 database: zod.string().describe('Redshift database name to connect to.'),
                                 host: zod
                                     .string()
@@ -1756,6 +1852,12 @@ export const BatchExportsPartialUpdateBody = /* @__PURE__ */ zod
                             ),
                         config: zod
                             .object({
+                                use_new_events_schema: zod
+                                    .boolean()
+                                    .optional()
+                                    .describe(
+                                        'Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move.'
+                                    ),
                                 http_path: zod.string().describe('Databricks SQL warehouse HTTP path.'),
                                 catalog: zod.string().describe('Unity Catalog name.'),
                                 schema: zod.string().describe('Schema (database) name inside the catalog.'),
@@ -1789,6 +1891,12 @@ export const BatchExportsPartialUpdateBody = /* @__PURE__ */ zod
                             ),
                         config: zod
                             .object({
+                                use_new_events_schema: zod
+                                    .boolean()
+                                    .optional()
+                                    .describe(
+                                        'Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move.'
+                                    ),
                                 container_name: zod.string().describe('Azure Blob Storage container name.'),
                                 prefix: zod
                                     .string()
@@ -1843,6 +1951,12 @@ export const BatchExportsPartialUpdateBody = /* @__PURE__ */ zod
                             ),
                         config: zod
                             .object({
+                                use_new_events_schema: zod
+                                    .boolean()
+                                    .optional()
+                                    .describe(
+                                        'Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move.'
+                                    ),
                                 dataset_id: zod.string().describe('BigQuery dataset ID to write to.'),
                                 table_id: zod
                                     .string()
@@ -1871,6 +1985,12 @@ export const BatchExportsPartialUpdateBody = /* @__PURE__ */ zod
                             ),
                         config: zod
                             .object({
+                                use_new_events_schema: zod
+                                    .boolean()
+                                    .optional()
+                                    .describe(
+                                        'Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move.'
+                                    ),
                                 database: zod.string().describe('PostgreSQL database name to connect to.'),
                                 schema: zod
                                     .string()
@@ -1905,6 +2025,12 @@ export const BatchExportsPartialUpdateBody = /* @__PURE__ */ zod
                             ),
                         config: zod
                             .object({
+                                use_new_events_schema: zod
+                                    .boolean()
+                                    .optional()
+                                    .describe(
+                                        'Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move.'
+                                    ),
                                 bucket_name: zod.string().describe('Name of the destination bucket.'),
                                 region: zod.string().describe("Region the bucket is in (e.g. 'us-east-1')."),
                                 prefix: zod.string().describe('Object key prefix applied to every exported file.'),
@@ -1967,6 +2093,12 @@ export const BatchExportsPartialUpdateBody = /* @__PURE__ */ zod
                             ),
                         config: zod
                             .object({
+                                use_new_events_schema: zod
+                                    .boolean()
+                                    .optional()
+                                    .describe(
+                                        'Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move.'
+                                    ),
                                 bucket_name: zod.string().describe('Name of the destination bucket.'),
                                 region: zod.string().describe("Region the bucket is in (e.g. 'us-east-1')."),
                                 prefix: zod.string().describe('Object key prefix applied to every exported file.'),
@@ -2025,6 +2157,12 @@ export const BatchExportsPartialUpdateBody = /* @__PURE__ */ zod
                             ),
                         config: zod
                             .object({
+                                use_new_events_schema: zod
+                                    .boolean()
+                                    .optional()
+                                    .describe(
+                                        'Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move.'
+                                    ),
                                 database: zod.string().describe('Snowflake database to write to.'),
                                 warehouse: zod.string().describe('Snowflake compute warehouse to use.'),
                                 schema: zod
@@ -2055,6 +2193,12 @@ export const BatchExportsPartialUpdateBody = /* @__PURE__ */ zod
                             ),
                         config: zod
                             .object({
+                                use_new_events_schema: zod
+                                    .boolean()
+                                    .optional()
+                                    .describe(
+                                        'Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move.'
+                                    ),
                                 database: zod.string().describe('Redshift database name to connect to.'),
                                 host: zod
                                     .string()
@@ -2504,6 +2648,12 @@ export const BatchExportsRunTestStepCreateBody = /* @__PURE__ */ zod
                     .union([
                         zod
                             .object({
+                                use_new_events_schema: zod
+                                    .boolean()
+                                    .optional()
+                                    .describe(
+                                        'Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move.'
+                                    ),
                                 http_path: zod.string().describe('Databricks SQL warehouse HTTP path.'),
                                 catalog: zod.string().describe('Unity Catalog name.'),
                                 schema: zod.string().describe('Schema (database) name inside the catalog.'),
@@ -2529,6 +2679,12 @@ export const BatchExportsRunTestStepCreateBody = /* @__PURE__ */ zod
                             ),
                         zod
                             .object({
+                                use_new_events_schema: zod
+                                    .boolean()
+                                    .optional()
+                                    .describe(
+                                        'Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move.'
+                                    ),
                                 container_name: zod.string().describe('Azure Blob Storage container name.'),
                                 prefix: zod
                                     .string()
@@ -2575,6 +2731,12 @@ export const BatchExportsRunTestStepCreateBody = /* @__PURE__ */ zod
                             ),
                         zod
                             .object({
+                                use_new_events_schema: zod
+                                    .boolean()
+                                    .optional()
+                                    .describe(
+                                        'Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move.'
+                                    ),
                                 dataset_id: zod.string().describe('BigQuery dataset ID to write to.'),
                                 table_id: zod
                                     .string()
@@ -2597,6 +2759,12 @@ export const BatchExportsRunTestStepCreateBody = /* @__PURE__ */ zod
                             ),
                         zod
                             .object({
+                                use_new_events_schema: zod
+                                    .boolean()
+                                    .optional()
+                                    .describe(
+                                        'Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move.'
+                                    ),
                                 database: zod.string().describe('PostgreSQL database name to connect to.'),
                                 schema: zod
                                     .string()
@@ -2623,6 +2791,12 @@ export const BatchExportsRunTestStepCreateBody = /* @__PURE__ */ zod
                             ),
                         zod
                             .object({
+                                use_new_events_schema: zod
+                                    .boolean()
+                                    .optional()
+                                    .describe(
+                                        'Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move.'
+                                    ),
                                 bucket_name: zod.string().describe('Name of the destination bucket.'),
                                 region: zod.string().describe("Region the bucket is in (e.g. 'us-east-1')."),
                                 prefix: zod.string().describe('Object key prefix applied to every exported file.'),
@@ -2677,6 +2851,12 @@ export const BatchExportsRunTestStepCreateBody = /* @__PURE__ */ zod
                             ),
                         zod
                             .object({
+                                use_new_events_schema: zod
+                                    .boolean()
+                                    .optional()
+                                    .describe(
+                                        'Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move.'
+                                    ),
                                 bucket_name: zod.string().describe('Name of the destination bucket.'),
                                 region: zod.string().describe("Region the bucket is in (e.g. 'us-east-1')."),
                                 prefix: zod.string().describe('Object key prefix applied to every exported file.'),
@@ -2727,6 +2907,12 @@ export const BatchExportsRunTestStepCreateBody = /* @__PURE__ */ zod
                             ),
                         zod
                             .object({
+                                use_new_events_schema: zod
+                                    .boolean()
+                                    .optional()
+                                    .describe(
+                                        'Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move.'
+                                    ),
                                 database: zod.string().describe('Snowflake database to write to.'),
                                 warehouse: zod.string().describe('Snowflake compute warehouse to use.'),
                                 schema: zod
@@ -2749,6 +2935,12 @@ export const BatchExportsRunTestStepCreateBody = /* @__PURE__ */ zod
                             ),
                         zod
                             .object({
+                                use_new_events_schema: zod
+                                    .boolean()
+                                    .optional()
+                                    .describe(
+                                        'Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move.'
+                                    ),
                                 database: zod.string().describe('Redshift database name to connect to.'),
                                 host: zod
                                     .string()
@@ -3231,6 +3423,12 @@ export const BatchExportsRunTestStepNewCreateBody = /* @__PURE__ */ zod
                     .union([
                         zod
                             .object({
+                                use_new_events_schema: zod
+                                    .boolean()
+                                    .optional()
+                                    .describe(
+                                        'Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move.'
+                                    ),
                                 http_path: zod.string().describe('Databricks SQL warehouse HTTP path.'),
                                 catalog: zod.string().describe('Unity Catalog name.'),
                                 schema: zod.string().describe('Schema (database) name inside the catalog.'),
@@ -3256,6 +3454,12 @@ export const BatchExportsRunTestStepNewCreateBody = /* @__PURE__ */ zod
                             ),
                         zod
                             .object({
+                                use_new_events_schema: zod
+                                    .boolean()
+                                    .optional()
+                                    .describe(
+                                        'Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move.'
+                                    ),
                                 container_name: zod.string().describe('Azure Blob Storage container name.'),
                                 prefix: zod
                                     .string()
@@ -3304,6 +3508,12 @@ export const BatchExportsRunTestStepNewCreateBody = /* @__PURE__ */ zod
                             ),
                         zod
                             .object({
+                                use_new_events_schema: zod
+                                    .boolean()
+                                    .optional()
+                                    .describe(
+                                        'Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move.'
+                                    ),
                                 dataset_id: zod.string().describe('BigQuery dataset ID to write to.'),
                                 table_id: zod
                                     .string()
@@ -3326,6 +3536,12 @@ export const BatchExportsRunTestStepNewCreateBody = /* @__PURE__ */ zod
                             ),
                         zod
                             .object({
+                                use_new_events_schema: zod
+                                    .boolean()
+                                    .optional()
+                                    .describe(
+                                        'Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move.'
+                                    ),
                                 database: zod.string().describe('PostgreSQL database name to connect to.'),
                                 schema: zod
                                     .string()
@@ -3354,6 +3570,12 @@ export const BatchExportsRunTestStepNewCreateBody = /* @__PURE__ */ zod
                             ),
                         zod
                             .object({
+                                use_new_events_schema: zod
+                                    .boolean()
+                                    .optional()
+                                    .describe(
+                                        'Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move.'
+                                    ),
                                 bucket_name: zod.string().describe('Name of the destination bucket.'),
                                 region: zod.string().describe("Region the bucket is in (e.g. 'us-east-1')."),
                                 prefix: zod.string().describe('Object key prefix applied to every exported file.'),
@@ -3408,6 +3630,12 @@ export const BatchExportsRunTestStepNewCreateBody = /* @__PURE__ */ zod
                             ),
                         zod
                             .object({
+                                use_new_events_schema: zod
+                                    .boolean()
+                                    .optional()
+                                    .describe(
+                                        'Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move.'
+                                    ),
                                 bucket_name: zod.string().describe('Name of the destination bucket.'),
                                 region: zod.string().describe("Region the bucket is in (e.g. 'us-east-1')."),
                                 prefix: zod.string().describe('Object key prefix applied to every exported file.'),
@@ -3458,6 +3686,12 @@ export const BatchExportsRunTestStepNewCreateBody = /* @__PURE__ */ zod
                             ),
                         zod
                             .object({
+                                use_new_events_schema: zod
+                                    .boolean()
+                                    .optional()
+                                    .describe(
+                                        'Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move.'
+                                    ),
                                 database: zod.string().describe('Snowflake database to write to.'),
                                 warehouse: zod.string().describe('Snowflake compute warehouse to use.'),
                                 schema: zod
@@ -3480,6 +3714,12 @@ export const BatchExportsRunTestStepNewCreateBody = /* @__PURE__ */ zod
                             ),
                         zod
                             .object({
+                                use_new_events_schema: zod
+                                    .boolean()
+                                    .optional()
+                                    .describe(
+                                        'Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move.'
+                                    ),
                                 database: zod.string().describe('Redshift database name to connect to.'),
                                 host: zod
                                     .string()

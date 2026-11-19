@@ -19220,6 +19220,8 @@ export namespace Schemas {
      * `AwsS3BatchExportInputs` in `products/batch_exports/backend/service.py`.
      */
     export interface AwsS3DestinationConfig {
+      /** Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move. */
+      use_new_events_schema?: boolean;
       /** Name of the destination bucket. */
       bucket_name: string;
       /** Region the bucket is in (e.g. 'us-east-1'). */
@@ -19434,6 +19436,8 @@ export namespace Schemas {
      * `AzureBlobBatchExportInputs` in `products/batch_exports/backend/service.py`.
      */
     export interface AzureBlobDestinationConfig {
+      /** Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move. */
+      use_new_events_schema?: boolean;
       /** Azure Blob Storage container name. */
       container_name: string;
       /** Object key prefix applied to every exported file. */
@@ -20045,6 +20049,8 @@ export namespace Schemas {
      * `DatabricksBatchExportInputs` in `products/batch_exports/backend/service.py`.
      */
     export interface DatabricksDestinationConfig {
+      /** Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move. */
+      use_new_events_schema?: boolean;
       /** Databricks SQL warehouse HTTP path. */
       http_path: string;
       /** Unity Catalog name. */
@@ -20075,6 +20081,8 @@ export namespace Schemas {
      * `products/batch_exports/backend/service.py`.
      */
     export interface BigQueryDestinationConfig {
+      /** Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move. */
+      use_new_events_schema?: boolean;
       /** BigQuery dataset ID to write to. */
       dataset_id: string;
       /** BigQuery table ID inside the dataset. */
@@ -20098,6 +20106,8 @@ export namespace Schemas {
      * non-credential fields of `PostgresBatchExportInputs` in `products/batch_exports/backend/service.py`.
      */
     export interface PostgresDestinationConfig {
+      /** Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move. */
+      use_new_events_schema?: boolean;
       /** PostgreSQL database name to connect to. */
       database: string;
       /** PostgreSQL schema name containing the destination table. */
@@ -20125,6 +20135,8 @@ export namespace Schemas {
      * `products/batch_exports/backend/service.py`.
      */
     export interface S3CompatibleDestinationConfig {
+      /** Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move. */
+      use_new_events_schema?: boolean;
       /** Name of the destination bucket. */
       bucket_name: string;
       /** Region the bucket is in (e.g. 'us-east-1'). */
@@ -20171,6 +20183,8 @@ export namespace Schemas {
      * `products/batch_exports/backend/service.py`.
      */
     export interface SnowflakeDestinationConfig {
+      /** Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move. */
+      use_new_events_schema?: boolean;
       /** Snowflake database to write to. */
       database: string;
       /** Snowflake compute warehouse to use. */
@@ -20241,6 +20255,8 @@ export namespace Schemas {
      * `products/batch_exports/backend/service.py`.
      */
     export interface RedshiftDestinationConfig {
+      /** Whether this export reads the new events table. Use it to try the new table on one export, such as a copy of a production export, before your other exports move. Setting it to false does not keep the export on the old table after all exports move. */
+      use_new_events_schema?: boolean;
       /** Redshift database name to connect to. */
       database: string;
       /** Redshift cluster or Serverless workgroup endpoint. Required when using an AWS Redshift integration; plain Redshift integrations store the host themselves. */
