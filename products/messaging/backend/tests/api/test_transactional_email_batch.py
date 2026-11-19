@@ -221,7 +221,7 @@ class TestTransactionalEmailBatch(APIBaseTest):
 
     def test_a_recipient_the_pipeline_cannot_address_fails_only_its_own_result(self, mock_post, _flag, _capture):
         mock_post.return_value = _batch_answer(ACCEPTED)
-        recipients = [
+        recipients: list[dict[str, Any]] = [
             {"to": "{{person.email}}@example.com", "idempotency_key": "key-0"},
             {"to": "user1@example.com", "idempotency_key": "key-1"},
             {"to": "not an address", "idempotency_key": "key-2"},
