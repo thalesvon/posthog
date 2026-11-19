@@ -22,7 +22,7 @@ from posthog.plugins.plugin_server_api import WORKFLOWS_TRANSACTIONAL_EMAIL_JWT_
 
 from products.messaging.backend.models.message_template import MessageTemplate
 from products.messaging.backend.models.transactional_email_key import TransactionalEmailKey
-from products.messaging.backend.presentation.views.email_batch import BATCH_REFUSED_FIELDS, SendEmailBatchSerializer
+from products.messaging.backend.presentation.views.email_batch import SendEmailBatchSerializer
 from products.messaging.backend.presentation.views.message_templates import (
     EMAIL_BATCH_FLAG,
     EMAIL_FROM_CODE_FLAG,
@@ -314,7 +314,7 @@ class TestTransactionalEmailBatch(APIBaseTest):
             ("over_the_django_upload_ceiling", 2 * 1024 * 1024, 1024 * 1024),
         ]
     )
-    def test_refuses_an_oversized_batch_without_reading_its_body(
+    def test_refuses_an_oversized_batch_and_reports_no_attachment_counts(
         self, mock_post, _flag, capture, _name, blob_bytes, upload_ceiling
     ):
         with override_settings(DATA_UPLOAD_MAX_MEMORY_SIZE=upload_ceiling):
@@ -348,7 +348,7 @@ class TestTransactionalEmailBatch(APIBaseTest):
     def test_the_batch_request_schema_takes_no_field_a_batch_refuses(self, _mock_post, _flag, _capture):
         request_fields = set(SendEmailBatchSerializer().fields)
 
-        assert request_fields.isdisjoint(BATCH_REFUSED_FIELDS)
+        assert request_fields.isdisjoint({"to", "distinct_id", "scheduled_at", "cc", "bcc", "attachments"})
         assert "recipients" in request_fields
 
     def _form_encoded_batch(self) -> Any:
