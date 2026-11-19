@@ -45,6 +45,7 @@ FROM {table}
 WHERE team_id = %(team_id)s
   AND message_id = %(message_id)s
   AND created_at >= %(start)s
+ORDER BY created_at DESC
 LIMIT 1
 """
 

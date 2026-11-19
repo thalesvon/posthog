@@ -61,10 +61,13 @@ class TestTransactionalEmailStatus(ClickhouseTestMixin, APIBaseTest):
     def _at(self, seconds: int) -> datetime:
         return self.queued_at + timedelta(seconds=seconds)
 
-    def _status_rows(self, rows: list[tuple[str, int, str]], team: Team | None = None) -> None:
+    def _status_rows(
+        self, rows: list[tuple[str, int, str]], team: Team | None = None, queued_at: datetime | None = None
+    ) -> None:
         """Insert (status, seconds after the send, reason) rows, in the given order."""
+        created_at = queued_at or self.queued_at
         for email_status, seconds, reason in rows:
-            status_at = self._at(seconds)
+            status_at = created_at + timedelta(seconds=seconds)
             sync_execute(
                 f"""
                 INSERT INTO {EMAIL_STATUS_DATA_TABLE}
@@ -77,7 +80,7 @@ class TestTransactionalEmailStatus(ClickhouseTestMixin, APIBaseTest):
                         "message_id": self.message_id,
                         "status": email_status,
                         "version": RANK[email_status] * 2**48 + int(status_at.timestamp() * 1000),
-                        "created_at": self.queued_at,
+                        "created_at": created_at,
                         "status_at": status_at,
                         "reason": reason,
                         "_timestamp": status_at,
@@ -139,19 +142,21 @@ class TestTransactionalEmailStatus(ClickhouseTestMixin, APIBaseTest):
             ("key_scoped_lookup_by_key", "/api/messaging/emails/status/?idempotency_key=order-%227%22%5Cshipped"),
         ]
     )
-    def test_reports_a_keyed_send_whose_id_holds_no_time(self, _flag, _name, path):
+    def test_reports_the_latest_send_of_a_key_whose_id_holds_no_time(self, _flag, _name, path):
         # A keyed send's id is a name-based UUID, so only its stored rows say when it was queued.
         self.message_id = str(keyed_message_id(self.team.id, 'order-"7"\\shipped'))
-        self._status_rows([("queued", 0, ""), ("sent", 2, "")])
+        earlier_send = self.queued_at - timedelta(days=5)
+        self._status_rows([("queued", 0, ""), ("sent", 2, ""), ("delivered", 5, "")], queued_at=earlier_send)
+        self._status_rows([("queued", 0, "")])
 
         response = self.client.get(path.format(team_id=self.team.id, message_id=self.message_id))
 
         assert response.status_code == status.HTTP_200_OK
         assert response.json() == {
             "id": self.message_id,
-            "status": "sent",
+            "status": "queued",
             "created_at": self.queued_at.isoformat().replace("+00:00", "Z"),
-            "status_at": self._at(2).isoformat().replace("+00:00", "Z"),
+            "status_at": self._at(0).isoformat().replace("+00:00", "Z"),
             "reason": None,
         }
 
