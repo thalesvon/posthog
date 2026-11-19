@@ -1,4 +1,8 @@
-import { trackPublish } from '../../intake/intake-producer'
+import { IngestionOutputs } from '~/common/outputs/ingestion-outputs'
+import { UUIDT } from '~/common/utils/utils'
+
+import { IntakeOutput, IntakeProducer } from '../../intake/intake-producer'
+import { CyclotronJobInvocationHogFlow } from '../../types'
 import { Semaphore } from '../../utils/sempahore'
 import {
     BatchCapacity,
@@ -66,13 +70,24 @@ describe('runBatchSlots', () => {
     it('holds the permit of a finished recipient until its publish settles, across batches', async () => {
         const slots = new Semaphore(1)
         const publish = gate()
+        const heldBroker = new IntakeProducer({
+            produce: () => publish.opened,
+        } as unknown as IngestionOutputs<IntakeOutput>)
+        const invocation = {
+            id: new UUIDT().toString(),
+            teamId: 7,
+            functionId: '0193a7b2-0000-7000-8000-000000000001',
+            queue: 'email',
+            queuePriority: 0,
+            state: { event: { event: '$transactional_email' }, actionStepCount: 0 },
+        } as unknown as CyclotronJobInvocationHogFlow
         const ran: string[] = []
         const run = (items: string[], sendOne: (item: string, slot: BatchSlot) => Promise<SlotReply>) =>
             runBatchSlots(items, sendOne, { slots, fanOut: 25, deadline: new AbortController().signal })
 
         const first = await run(['a'], (item, slot) => {
             ran.push(item)
-            trackPublish(slot.settlement, publish.opened)
+            void heldBroker.produce({ kind: 'transactional-email', invocation }, 'async', slot.settlement)
             return Promise.resolve(queued(item))
         })
         const second = run(['b'], (item) => {

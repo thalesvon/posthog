@@ -4,7 +4,7 @@ import { z } from 'zod'
 
 import { logger } from '~/common/utils/logger'
 
-import { PublishSettlement, newPublishSettlement, publishesSettled } from '../../intake/intake-producer'
+import { PublishSettlement, publishesSettled } from '../../intake/intake-producer'
 import { Semaphore } from '../../utils/sempahore'
 import { BatchSendSchema, TransactionalEmailOutcome, TransactionalEmailRequestSchema } from './transactional-email'
 
@@ -209,7 +209,7 @@ export const runBatchSlots = async <T>(
 
     const runOne = async (i: number): Promise<void> => {
         started[i] = true
-        const settlement = newPublishSettlement()
+        const settlement = new PublishSettlement()
         let mayHaveCommitted = false
         try {
             replies[i] = await runSlot(items[i], {
