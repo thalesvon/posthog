@@ -22,7 +22,9 @@ import type { RequestProperties } from '@/lib/request-properties'
 import { formatResponse } from '@/lib/response'
 import {
     boundText,
+    byteLength,
     jsonResponseBody,
+    maxResponseBytes,
     responseTokenBudget,
     type ResponseBodySource,
     toonResponseBody,
@@ -2488,12 +2490,19 @@ export function createExecTool(
                     }
                     const chartData =
                         !useJson && options.appendTimeSeriesChartData ? buildTimeSeriesChartData(result) : undefined
-                    if (chartData) {
-                        outputText = `${outputText}\n\n${chartData}`
-                    }
-                    // Bound here, where the handler result is still available to re-serialize.
+                    const chartFooter = chartData ? `\n\n${chartData}` : ''
+                    // Reserve the chart's bytes before re-serializing the result body.
                     const budget = responseTokenBudget(options.toolResultTokenLimit, input)
-                    if (budget !== undefined) {
+                    if (budget === undefined) {
+                        outputText += chartFooter
+                    } else if (chartFooter) {
+                        const bodyBudget = maxResponseBytes(budget) - byteLength(chartFooter)
+                        const body = bodyBudget > 0 ? boundText(outputText, budget, bodySource, bodyBudget) : undefined
+                        outputText =
+                            body !== undefined && byteLength(body) <= bodyBudget
+                                ? body + chartFooter
+                                : boundText(outputText, budget, bodySource)
+                    } else {
                         outputText = boundText(outputText, budget, bodySource)
                     }
                     trackInnerCall?.(tool.name, {

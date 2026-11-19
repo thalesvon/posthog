@@ -415,6 +415,23 @@ describe('exec tool', () => {
             expect((result as string).endsWith(`\n\n${CHART_DATA_PREAMBLE}\n${block}`)).toBe(appended)
         })
 
+        it('keeps the chart when a large text result is shortened', async () => {
+            const handlerResult = {
+                results: [{ data: [5, 7], days: ['2026-11-10', '2026-11-11'], label: 'signups' }],
+                details: 'More context about the results. '.repeat(120),
+            }
+            const limit = 300
+            const exec = createExec([makeMockTool({ handler: async () => handlerResult })], undefined, {
+                appendTimeSeriesChartData: true,
+                toolResultTokenLimit: limit,
+            })
+
+            const result = (await exec.handler(mockContext, { command: 'call mock-tool' })) as string
+
+            expect(result).toContain(CHART_DATA_PREAMBLE)
+            expect(Buffer.byteLength(result)).toBeLessThanOrEqual(maxResponseBytes(limit))
+        })
+
         it('returns raw JSON when --json flag is passed in command', async () => {
             const exec = createExec()
             const result = await exec.handler(mockContext, { command: 'call --json mock-tool' })

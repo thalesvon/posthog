@@ -27,7 +27,6 @@ from products.event_definitions.backend.models import EventDefinition
 from products.product_analytics.backend.facade.models import Insight, InsightVariable
 
 from ee.hogai.context.insight.context import InsightContext
-from ee.hogai.context.insight.format.sql import SQLResultsFormatter
 from ee.hogai.tool_errors import MaxToolError, MaxToolRetryableError
 from ee.hogai.tools.execute_sql.compatibility_hints import ACCEPTED_CAST_TYPES
 from ee.hogai.tools.execute_sql.mcp_tool import (
