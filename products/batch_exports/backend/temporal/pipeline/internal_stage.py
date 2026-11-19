@@ -464,7 +464,7 @@ async def _stage_query_results(
     else:
         if full_range[1] is None or inputs.data_interval_end is None:
             raise MissingRequiredInputsError("Fixed batch export models require data_interval_end")
-        query_or_model, query_parameters, reads_new_events_table = await _get_query(
+        export_query = await _get_query(
             model_name=model_name,
             backfill_details=inputs.backfill_details,
             team_id=inputs.team_id,
@@ -484,6 +484,9 @@ async def _stage_query_results(
             is_workflows=inputs.is_workflows,
             new_events_schema_opt_in=inputs.use_new_events_schema,
         )
+        query_or_model = export_query.query
+        query_parameters = export_query.parameters
+        reads_new_events_table = export_query.reads_new_events_table
 
     try:
         return await _write_batch_export_record_batches_to_internal_stage(
@@ -576,6 +579,13 @@ async def compute_num_partitions(
     return max(min_partitions, min(n, max_partitions))
 
 
+@frozen
+class EventsExportQuery:
+    query: str
+    parameters: dict[str, typing.Any]
+    reads_new_events_table: bool
+
+
 async def _get_query(
     model_name: str,
     backfill_details: BackfillDetails | None,
@@ -593,8 +603,7 @@ async def _get_query(
     is_workflows: bool = False,
     new_events_schema_opt_in: bool = False,
     **parameters,
-) -> tuple[str, dict[str, typing.Any], bool]:
-    """The query, its parameters, and whether it reads events_json."""
+) -> EventsExportQuery:
     logger = LOGGER.bind(model_name=model_name)
 
     if fields is None:
@@ -724,7 +733,7 @@ async def _get_query(
     parameters["log_comment"] = tags.to_json()
 
     parameters = {**parameters, **extra_query_parameters}
-    return query, parameters, native_source
+    return EventsExportQuery(query=query, parameters=parameters, reads_new_events_table=native_source)
 
 
 def get_base_s3_staging_folder(
