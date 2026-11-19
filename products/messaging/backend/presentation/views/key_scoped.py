@@ -16,6 +16,7 @@ from rest_framework.response import Response
 from posthog.rate_limit import reserve_units
 
 from products.messaging.backend.facade.transactional_email import (
+    BatchNotAdmitted,
     DeliveryUnavailable,
     EmailBatchSent,
     QueuedEmail,
@@ -33,6 +34,7 @@ from products.messaging.backend.presentation.views.email_batch import (
     SendEmailBatchSerializer,
     UnreadBody,
     batch_body_too_large,
+    batch_not_admitted,
     email_batch_outcome,
     email_batch_response,
     refused_batch_field,
@@ -134,6 +136,9 @@ class KeyScopedMessagingSendViewSet(MessagingSendViewSet):
                 usage_properties = {"template_id": str(template.id)}
         except TransactionalEmailError as e:
             raise TransactionalEmailRejected(e) from None
+        except BatchNotAdmitted:
+            self._report_transactional_email_send(request, {"outcome": "not_admitted"})
+            raise batch_not_admitted() from None
         except DeliveryUnavailable:
             self._report_transactional_email_send(request, {"outcome": "unavailable"})
             raise unconfirmed_batch() from None

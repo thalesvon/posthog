@@ -567,7 +567,7 @@ class TestTransactionalEmailBatch(APIBaseTest):
         [
             ("pod_without_batch_routes", {"return_value": _response(401, {"error": "Unauthorized"})}),
             ("pipeline_error", {"return_value": _response(500, {})}),
-            ("admission_refused", {"return_value": _response(503, {"error": "batch_capacity"})}),
+            ("an_unknown_refusal", {"return_value": _response(503, {"error": "some_new_refusal"})}),
             ("timeout", {"side_effect": requests.ReadTimeout()}),
             ("an_answer_missing", {"return_value": _batch_answer(ACCEPTED)}),
             ("an_answer_without_a_status", {"return_value": _batch_answer(ACCEPTED, {"body": {}})}),
@@ -661,6 +661,17 @@ class TestTransactionalEmailBatch(APIBaseTest):
         assert response.json()["code"] == "delivery_unavailable"
         assert "may still go out" in response.json()["detail"]
         assert [call.kwargs["properties"]["outcome"] for call in capture.call_args_list] == ["unavailable"]
+
+    def test_a_batch_the_pipeline_turns_away_says_this_request_queued_nothing(self, mock_post, _flag, capture):
+        mock_post.return_value = _response(503, {"error": "over_capacity"})
+
+        response = self._batch("code")
+
+        assert response.status_code == status.HTTP_503_SERVICE_UNAVAILABLE, response.json()
+        assert response.json()["code"] == "delivery_unavailable"
+        assert "queued none of the batch's emails" in response.json()["detail"]
+        assert "may still go out" not in response.json()["detail"]
+        assert [call.kwargs["properties"]["outcome"] for call in capture.call_args_list] == ["not_admitted"]
 
     @patch("posthog.rate_limit.team_is_allowed_to_bypass_throttle", return_value=False)
     @patch("posthog.rate_limit.is_rate_limit_enabled", return_value=True)

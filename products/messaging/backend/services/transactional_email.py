@@ -35,6 +35,7 @@ from products.messaging.backend.facade.contracts import (
     AttachmentUploadRequest,
     AttachmentUploadSlot,
     AttachmentUploadTarget,
+    BatchNotAdmitted,
     BatchRecipient,
     CodeEmail,
     ContentTooLarge,
@@ -1004,6 +1005,8 @@ def _batch_answers(
         status_code=response.status_code,
         refusal_code=_refusal_code(answer),
     )
+    if response.status_code == 503 and _refusal_code(answer) == "over_capacity":
+        raise BatchNotAdmitted()
     raise DeliveryUnavailable()
 
 
