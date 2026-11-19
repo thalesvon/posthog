@@ -87,20 +87,18 @@ describe('RunIntake', () => {
             { runId: keyedRunId(1, 'transactional-email', 'b'), fingerprint: 'request-b' },
             { runId: keyedRunId(1, 'transactional-email', 'c'), fingerprint: 'request-c' },
         ]
-        const intakeOver = (findIdempotencyKeys: () => Promise<any>): RunIntake =>
+        const intakeOver = (findIdempotencyKeys: (runIds: string[]) => Promise<any>): RunIntake =>
             new RunIntake({
                 hogflowQueue: { ...createMockJobQueue(), findIdempotencyKeys: jest.fn(findIdempotencyKeys) },
                 invocationResultsRowsService: {} as HogInvocationResultsService,
             })
 
         it('answers each claim from its own row of one read', async () => {
-            const intake = intakeOver(() =>
-                Promise.resolve([
-                    null,
-                    { fingerprint: 'request-b', reply: null },
-                    { fingerprint: 'other', reply: null },
-                ])
-            )
+            const rowsByRunId: Record<string, { fingerprint: string; reply: null }> = {
+                [claims[1].runId]: { fingerprint: 'request-b', reply: null },
+                [claims[2].runId]: { fingerprint: 'other', reply: null },
+            }
+            const intake = intakeOver((runIds) => Promise.resolve(runIds.map((runId) => rowsByRunId[runId] ?? null)))
 
             expect((await intake.recallAllWithin(claims, 'transactional-email')).map(({ status }) => status)).toEqual([
                 'absent',

@@ -5475,6 +5475,8 @@ describe('CDP API', () => {
 
             afterEach(() => {
                 setIntakeModes({})
+                // The team outlives each test, so its cached workflows config would carry a suspension into the next one.
+                api['teamWorkflowsConfigService']['lazyLoader'].markForRefresh(String(team.id))
             })
 
             it('publishes one intake run per sendable recipient, and answers each recipient in order with its run id', async () => {
@@ -5578,18 +5580,30 @@ describe('CDP API', () => {
                     422,
                     'sending_paused',
                     () =>
-                        jest
-                            .spyOn(api['hogFlowManager'], 'getHogFlowCheckingPrimaryOnMiss')
-                            .mockResolvedValue({ ...hogFlow, email_sending_paused_at: Date.now() }),
+                        hub.postgres.query(
+                            PostgresUse.COMMON_WRITE,
+                            `UPDATE posthog_hogflow SET email_sending_paused_at = now() WHERE id = $1`,
+                            [hogFlow.id],
+                            'pause-workflow-sending'
+                        ),
                 ],
                 [
                     'email sending is suspended for the project',
                     422,
                     'sending_suspended',
-                    () =>
-                        jest
-                            .spyOn(api['teamWorkflowsConfigService'], 'getEmailSendingSuspension')
-                            .mockResolvedValue('staff'),
+                    async () => {
+                        await hub.postgres.query(
+                            PostgresUse.COMMON_WRITE,
+                            `INSERT INTO workflows_teamworkflowsconfig
+                                (team_id, capture_workflows_engagement_events, email_tracking_consent_mode,
+                                 email_sending_suspended_at, email_sending_suspension_reason)
+                             VALUES ($1, false, 'off', now(), 'suspended by staff')
+                             ON CONFLICT (team_id) DO UPDATE SET email_sending_suspended_at = now()`,
+                            [team.id],
+                            'suspend-email-sending'
+                        )
+                        api['teamWorkflowsConfigService']['lazyLoader'].markForRefresh(String(team.id))
+                    },
                 ],
             ])(
                 'refuses a whole batch when %s, a recipient already queued included, and publishes none of it',
@@ -5623,19 +5637,23 @@ describe('CDP API', () => {
             )
 
             it('refuses a whole batch of a marketing email when the team is over its email quota', async () => {
-                jest.spyOn(api['deps'].quotaLimiting, 'isTeamQuotaLimited').mockResolvedValue(true)
-                const marketingFlow = await insertHogFlow(transactionalFlow('api', 'active', 'marketing'))
+                await setTeamQuotaLimited(hub, team, 'workflow_emails', true)
+                try {
+                    const marketingFlow = await insertHogFlow(transactionalFlow('api', 'active', 'marketing'))
 
-                const res = await supertest(app)
-                    .post(`/api/projects/${team.id}/hog_flows/${marketingFlow.id}/${TEMPLATE}`)
-                    .set({
-                        Authorization: `Bearer ${mintToken(team.id, marketingFlow.id, { claims: { kind: 'template_batch' } })}`,
-                    })
-                    .send({ variables: body.variables, recipients: [recipient('ada@example.com')] })
+                    const res = await supertest(app)
+                        .post(`/api/projects/${team.id}/hog_flows/${marketingFlow.id}/${TEMPLATE}`)
+                        .set({
+                            Authorization: `Bearer ${mintToken(team.id, marketingFlow.id, { claims: { kind: 'template_batch' } })}`,
+                        })
+                        .send({ variables: body.variables, recipients: [recipient('ada@example.com')] })
 
-                expect(res.status).toEqual(429)
-                expect(res.body).toEqual({ error: 'quota_limited' })
-                expect(intakeRecords()).toEqual([])
+                    expect(res.status).toEqual(429)
+                    expect(res.body).toEqual({ error: 'quota_limited' })
+                    expect(intakeRecords()).toEqual([])
+                } finally {
+                    await setTeamQuotaLimited(hub, team, 'workflow_emails', false)
+                }
             })
 
             it.each([
