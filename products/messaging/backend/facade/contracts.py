@@ -273,6 +273,10 @@ class SendNotAttempted(DeliveryUnavailable):
     pass
 
 
+class SendNotQueued(DeliveryUnavailable):
+    pass
+
+
 @frozen
 class BatchRecipient:
     to: str

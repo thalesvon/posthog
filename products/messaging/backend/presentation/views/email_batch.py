@@ -22,6 +22,7 @@ from products.messaging.backend.facade.transactional_email import (
     InvalidRecipient,
     QueuedEmail,
     SendNotAttempted,
+    SendNotQueued,
     TransactionalEmailError,
 )
 from products.messaging.backend.presentation.views.code_send_fields import (
@@ -38,6 +39,8 @@ from products.messaging.backend.presentation.views.refusals import ExplainedRefu
 
 BATCH_MAX_RECIPIENTS = 100
 BATCH_BODY_MAX_BYTES = 5 * 1024 * 1024
+BATCH_BODY_MAX_DEPTH = 100
+SHOWN_FIELD_NAME_MAX_LENGTH = 64
 BATCH_REFUSED_FIELDS = ("scheduled_at", *CODE_SEND_EXTRA_FIELDS)
 FIELDS_THAT_FAIL_ONE_RECIPIENT = frozenset({"to", "distinct_id"})
 RECIPIENT_FIELDS_OUTSIDE_RECIPIENTS = {"to": "to", "distinct_id": "distinct_id", "identifiers": "distinct_id"}
@@ -49,6 +52,10 @@ UNCONFIRMED_EMAIL = (
 )
 NOT_ATTEMPTED_EMAIL = (
     "PostHog stopped before it sent this email, so nothing was queued. Send it again with the same `idempotency_key`."
+)
+NOT_QUEUED_EMAIL = (
+    "The email pipeline failed before it queued this email, so it won't go out. Send it again with the same "
+    "`idempotency_key`."
 )
 
 
@@ -79,7 +86,9 @@ class BatchJSONParser(BaseParser):
         except ValueError as e:
             return UnreadBody(ParseError(f"JSON parse error - {e}"))
         except RecursionError:
-            return UnreadBody(ParseError("JSON parse error - the body nests too deeply."))
+            return UnreadBody(_too_deep())
+        if _nests_too_deeply(value):
+            return UnreadBody(_too_deep())
         try:
             json.dumps(value, ensure_ascii=False).encode()
         except UnicodeEncodeError:
@@ -90,6 +99,22 @@ class BatchJSONParser(BaseParser):
                 )
             )
         return value
+
+
+def _too_deep() -> ParseError:
+    return ParseError(f"JSON parse error - the body nests deeper than {BATCH_BODY_MAX_DEPTH} levels.")
+
+
+def _nests_too_deeply(value: Any) -> bool:
+    pending = [(value, 1)]
+    while pending:
+        item, depth = pending.pop()
+        if not isinstance(item, dict | list):
+            continue
+        if depth > BATCH_BODY_MAX_DEPTH:
+            return True
+        pending.extend((child, depth + 1) for child in (item.values() if isinstance(item, dict) else item))
+    return False
 
 
 def _members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -289,7 +314,8 @@ def refused_batch_field(data: Any, *, takes_template_key: bool) -> ExplainedRefu
             continue
         if field := next((field for field in BATCH_REFUSED_FIELDS if field in recipient), None):
             return _field_refusal(f"recipients__{index}__{field}")
-        if (field := next((name for name in recipient if name not in RECIPIENT_FIELDS), None)) is not None:
+        if (unknown := next((name for name in recipient if name not in RECIPIENT_FIELDS), None)) is not None:
+            field = _shown(unknown)
             return ExplainedRefusal(
                 f"A batch recipient doesn't take `{field}`, so PostHog didn't send the batch.",
                 code="field_not_accepted",
@@ -355,6 +381,8 @@ def email_batch_outcome(result: QueuedEmail | TransactionalEmailError | Delivery
         return outcome
     if isinstance(result, SendNotAttempted):
         return {"outcome": "not_attempted"}
+    if isinstance(result, SendNotQueued):
+        return {"outcome": "not_queued"}
     if isinstance(result, DeliveryUnavailable):
         return {"outcome": "unavailable"}
     return {"outcome": "rejected", "error_code": result.code}
@@ -366,6 +394,8 @@ def _result(result: QueuedEmail | TransactionalEmailError | DeliveryUnavailable)
     status_code: int
     if isinstance(result, SendNotAttempted):
         code, detail, status_code = "not_attempted", NOT_ATTEMPTED_EMAIL, status.HTTP_503_SERVICE_UNAVAILABLE
+    elif isinstance(result, SendNotQueued):
+        code, detail, status_code = "delivery_unavailable", NOT_QUEUED_EMAIL, status.HTTP_503_SERVICE_UNAVAILABLE
     elif isinstance(result, DeliveryUnavailable):
         code, detail, status_code = "delivery_unavailable", UNCONFIRMED_EMAIL, status.HTTP_503_SERVICE_UNAVAILABLE
     else:
@@ -374,12 +404,17 @@ def _result(result: QueuedEmail | TransactionalEmailError | DeliveryUnavailable)
     return {"error": {"code": code, "detail": detail, "status": status_code, "retryable": code in RETRYABLE_CODES}}
 
 
+def _shown(name: str) -> str:
+    return name if len(name) <= SHOWN_FIELD_NAME_MAX_LENGTH else f"{name[:SHOWN_FIELD_NAME_MAX_LENGTH]}…"
+
+
 @cache
 def _batch_fields() -> frozenset[str]:
     return frozenset(SendEmailBatchSerializer().fields.keys())
 
 
-def _unknown_field_refusal(field: str) -> ExplainedRefusal:
+def _unknown_field_refusal(unknown: str) -> ExplainedRefusal:
+    field = _shown(unknown)
     return ExplainedRefusal(
         f"A batch send doesn't take `{field}`, so PostHog didn't send the batch.",
         code="field_not_accepted",

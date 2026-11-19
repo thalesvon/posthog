@@ -24,6 +24,11 @@ from posthog.plugins.plugin_server_api import WORKFLOWS_TRANSACTIONAL_EMAIL_JWT_
 
 from products.messaging.backend.models.message_template import MessageTemplate
 from products.messaging.backend.models.transactional_email_key import TransactionalEmailKey
+from products.messaging.backend.presentation.views.email_batch import (
+    NOT_ATTEMPTED_EMAIL,
+    NOT_QUEUED_EMAIL,
+    UNCONFIRMED_EMAIL,
+)
 from products.messaging.backend.presentation.views.message_templates import (
     EMAIL_BATCH_FLAG,
     EMAIL_FROM_CODE_FLAG,
@@ -296,6 +301,7 @@ class TestTransactionalEmailBatch(APIBaseTest):
                 400,
                 "mesage_data",
             ),
+            ("shared_unknown_field_with_a_long_name", "code", {"x" * 10_000: 1}, 400, "x" * 64 + "…"),
             ("shared_field_name_that_is_not_valid_unicode", "code", {"\ud800": 1}, 400, None),
             ("shared_html_with_a_lone_surrogate", "code", {"html": "<p>\ud800</p>"}, 400, None),
             ("sender_name_with_a_lone_surrogate", "code", {"from": "\ud800 <hello@example.com>"}, 400, None),
@@ -330,6 +336,13 @@ class TestTransactionalEmailBatch(APIBaseTest):
                 {"recipients": [{**RECIPIENT, "": 1, "mesage_data": {"n": 1}}]},
                 400,
                 "recipients__0__",
+            ),
+            (
+                "recipient_unknown_field_with_a_long_name",
+                "template",
+                {"recipients": [{**RECIPIENT, "x" * 10_000: 1}]},
+                400,
+                "recipients__0__" + "x" * 64 + "…",
             ),
             (
                 "recipient_field_name_that_is_not_valid_unicode",
@@ -434,7 +447,9 @@ class TestTransactionalEmailBatch(APIBaseTest):
             ("number_beyond_a_float", "1e400", 400, "parse_error"),
             ("integer_beyond_a_float", "1" + "0" * 400, 400, "parse_error"),
             ("member_named_twice", '"Welcome", "subject": "Welcome again"', 400, "parse_error"),
-            ("nesting_too_deep", "[" * 100_000 + "]" * 100_000, 400, "parse_error"),
+            ("nesting_past_the_limit", "[" * 101 + "]" * 101, 400, "parse_error"),
+            ("nesting_too_deep_to_encode", "[" * 50_000 + "]" * 50_000, 400, "parse_error"),
+            ("nesting_too_deep_to_decode", "[" * 100_000 + "]" * 100_000, 400, "parse_error"),
             ("cut_off_over_the_batch_cap", '"' + "x" * 6 * 1024 * 1024, 413, "content_too_large"),
         ]
     )
@@ -487,17 +502,21 @@ class TestTransactionalEmailBatch(APIBaseTest):
         response = self._batch(form, self._recipients(5))
 
         assert response.status_code == status.HTTP_200_OK, response.json()
-        replayed, refused, *unstarted, unrecognized = response.json()["results"]
+        replayed, refused, unstarted, not_queued, unrecognized = response.json()["results"]
         assert replayed == {"message_id": MESSAGE_ID, "status": "queued", "replayed": True}
         assert {name: refused["error"][name] for name in ("code", "status", "retryable")} == {
             "code": "transactional_email_paused",
             "status": 400,
             "retryable": False,
         }
-        assert [{name: result["error"][name] for name in ("code", "status", "retryable")} for result in unstarted] == [
-            {"code": "not_attempted", "status": 503, "retryable": True}
-        ] * 2
-        assert (unrecognized["error"]["code"], unrecognized["error"]["retryable"]) == ("delivery_unavailable", True)
+        assert [
+            {name: result["error"][name] for name in ("code", "detail", "status", "retryable")}
+            for result in (unstarted, not_queued, unrecognized)
+        ] == [
+            {"code": "not_attempted", "detail": NOT_ATTEMPTED_EMAIL, "status": 503, "retryable": True},
+            {"code": "delivery_unavailable", "detail": NOT_QUEUED_EMAIL, "status": 503, "retryable": True},
+            {"code": "delivery_unavailable", "detail": UNCONFIRMED_EMAIL, "status": 503, "retryable": True},
+        ]
         assert f"/hog_flows/{hog_flow_id}/" in mock_post.call_args.args[0]
 
     @parameterized.expand(PIPELINE_ANSWERS)

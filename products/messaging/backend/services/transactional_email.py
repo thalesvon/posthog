@@ -65,6 +65,7 @@ from products.messaging.backend.facade.contracts import (
     SendingPaused,
     SendingSuspended,
     SendNotAttempted,
+    SendNotQueued,
     SendWarning,
     SendWarningCode,
     SensitiveTemplate,
@@ -1035,11 +1036,10 @@ def _batch_result(
 ) -> QueuedEmail | TransactionalEmailError | DeliveryUnavailable:
     status_code, body = answer
     refusal_code = _refusal_code(body)
-    if status_code == 503 and (
-        refusal_code == "not_attempted"
-        or (refusal_code == "delivery_unavailable" and body.get("may_still_go_out") is False)
-    ):
+    if status_code == 503 and refusal_code == "not_attempted":
         return SendNotAttempted()
+    if status_code == 503 and refusal_code == "delivery_unavailable" and body.get("may_still_go_out") is False:
+        return SendNotQueued()
     try:
         return _queued_email(
             team_id, hog_flow_id, status_code, body, has_attachments=False, sandbox_warning=sandbox_warning
