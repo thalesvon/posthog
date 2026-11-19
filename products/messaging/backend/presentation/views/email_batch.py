@@ -390,7 +390,9 @@ def unconfirmed_batch() -> ExplainedRefusal:
 def _size(size_bytes: int) -> str:
     if size_bytes % (1024 * 1024) == 0:
         return f"{size_bytes // (1024 * 1024)} MiB"
-    return f"{size_bytes // 1024} KiB"
+    if size_bytes % 1024 == 0:
+        return f"{size_bytes // 1024} KiB"
+    return f"{size_bytes:,} bytes"
 
 
 def email_batch_response(sent: EmailBatchSent) -> dict[str, Any]:

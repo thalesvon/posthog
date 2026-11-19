@@ -408,6 +408,7 @@ class TestTransactionalEmailBatch(APIBaseTest):
         [
             ("over_the_batch_cap", 5 * 1024 * 1024, 20 * 1024 * 1024, "5 MiB"),
             ("over_the_django_upload_ceiling", 2 * 1024 * 1024, 1024 * 1024, "1 MiB"),
+            ("over_an_uneven_django_upload_ceiling", 2 * 1024 * 1024, 1024 * 1024 + 1, "1,048,577 bytes"),
         ]
     )
     def test_refuses_an_oversized_batch_and_reports_no_attachment_counts(
@@ -623,6 +624,15 @@ class TestTransactionalEmailBatch(APIBaseTest):
                                 "error": "recipient_suppressed",
                             },
                         },
+                    )
+                },
+            ),
+            (
+                "an_answer_that_is_refused_and_queued",
+                {
+                    "return_value": _batch_answer(
+                        ACCEPTED,
+                        {"status": 422, "body": {"error": "recipient_suppressed", "invocation_id": SECOND_MESSAGE_ID}},
                     )
                 },
             ),

@@ -1020,6 +1020,8 @@ def _batch_answer_list(answer: dict[str, Any], expected: int) -> list[tuple[int,
             return None
         if status_code >= 500 and _refusal_code(body) in PIPELINE_REFUSALS:
             return None
+        if status_code != 202 and "invocation_id" in body:
+            return None
         if status_code == 202 and (
             "error" in body
             or not (_is_message_id(body.get("invocation_id")) and isinstance(body.get("replayed"), bool))
