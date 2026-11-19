@@ -64,7 +64,7 @@ class BatchJSONParser(BaseParser):
 
     def parse(self, stream: Any, media_type: str | None = None, parser_context: Mapping[str, Any] | None = None) -> Any:
         if (media_type or "").split(";")[0].strip().lower() != JSONParser.media_type:
-            return UnreadBody(UnsupportedMediaType(media_type))
+            return UnreadBody(UnsupportedMediaType(media_type or ""))
         context = parser_context or {}
         body = context["request"].body if "request" in context else stream.read()
         try:
