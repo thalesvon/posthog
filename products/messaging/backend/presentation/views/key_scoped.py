@@ -17,6 +17,7 @@ from posthog.rate_limit import reserve_units
 
 from products.messaging.backend.facade.transactional_email import (
     BatchNotAdmitted,
+    BatchTooLarge,
     DeliveryUnavailable,
     EmailBatchSent,
     QueuedEmail,
@@ -35,6 +36,7 @@ from products.messaging.backend.presentation.views.email_batch import (
     UnreadBody,
     batch_body_too_large,
     batch_not_admitted,
+    batch_too_large_to_send,
     email_batch_outcome,
     email_batch_response,
     refused_batch_field,
@@ -93,8 +95,11 @@ class KeyScopedMessagingSendViewSet(MessagingSendViewSet):
             "Name a template made transactional in `template_id`, where each recipient's `message_data` is merged "
             "over the shared `message_data`. Or send content your code rendered with a `template_key`, the same for "
             "every recipient. The response holds one result per recipient, in the order of the request: a recipient "
-            "can fail while the others are queued. Each recipient counts against the send rate limit. Needs the "
-            "`transactional_email:write` scope."
+            "can fail while the others are queued. Each result carries the recipient's `message_id`, so you can read "
+            "its status. A refusal of the whole batch, such as an exhausted quota or a paused email, answers with "
+            "an error and no `results`, even on a retry whose first request queued some recipients. Read each "
+            "recipient's status by its `idempotency_key` then. Each recipient counts against the send rate limit. "
+            "Needs the `transactional_email:write` scope."
         ),
     )
     @action(
@@ -139,6 +144,9 @@ class KeyScopedMessagingSendViewSet(MessagingSendViewSet):
                 usage_properties = {"template_id": str(template.id)}
         except TransactionalEmailError as e:
             raise TransactionalEmailRejected(e) from None
+        except BatchTooLarge:
+            self._report_transactional_email_send(request, {"outcome": "rejected", "error_code": "content_too_large"})
+            raise batch_too_large_to_send() from None
         except BatchNotAdmitted:
             self._report_transactional_email_send(request, {"outcome": "not_admitted"})
             raise batch_not_admitted() from None

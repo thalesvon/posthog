@@ -221,6 +221,10 @@ class SandboxSenderNotAvailable(TransactionalEmailError):
     code = "sandbox_sender_unavailable"
 
 
+class BatchUnavailable(TransactionalEmailError):
+    code = "batch_unavailable"
+
+
 @frozen
 class EmailTracking:
     opens: bool = True
@@ -269,15 +273,11 @@ class QueuedEmail:
     attachment_bytes: int | None = None
 
 
-class SendNotAttempted(DeliveryUnavailable):
-    pass
-
-
-class SendNotQueued(DeliveryUnavailable):
-    pass
-
-
 class BatchNotAdmitted(DeliveryUnavailable):
+    pass
+
+
+class BatchTooLarge(Exception):
     pass
 
 
@@ -291,8 +291,14 @@ class BatchRecipient:
 
 
 @frozen
+class EmailNotQueued:
+    message_id: str
+    error: TransactionalEmailError | DeliveryUnavailable
+
+
+@frozen
 class EmailBatchSent:
-    results: tuple[QueuedEmail | TransactionalEmailError | DeliveryUnavailable, ...]
+    results: tuple[QueuedEmail | EmailNotQueued, ...]
     warnings: tuple[SendWarning, ...] = ()
 
 

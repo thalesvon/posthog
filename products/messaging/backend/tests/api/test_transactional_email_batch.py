@@ -25,11 +25,7 @@ from posthog.plugins.plugin_server_api import WORKFLOWS_TRANSACTIONAL_EMAIL_JWT_
 
 from products.messaging.backend.models.message_template import MessageTemplate
 from products.messaging.backend.models.transactional_email_key import TransactionalEmailKey
-from products.messaging.backend.presentation.views.email_batch import (
-    NOT_ATTEMPTED_EMAIL,
-    NOT_QUEUED_EMAIL,
-    UNCONFIRMED_EMAIL,
-)
+from products.messaging.backend.presentation.views.email_batch import UNCONFIRMED_EMAIL
 from products.messaging.backend.presentation.views.message_templates import (
     EMAIL_BATCH_FLAG,
     EMAIL_FROM_CODE_FLAG,
@@ -40,10 +36,11 @@ from products.messaging.backend.presentation.views.message_templates import (
     TransactionalEmailTeamSustainedThrottle,
 )
 from products.messaging.backend.services.transactional_email import (
-    PIPELINE_REFUSALS,
+    BATCH_SANDBOX_SENDER_WARNING,
     TRANSACTIONAL_EMAIL_KEY_LIMIT,
     make_transactional,
 )
+from products.messaging.backend.services.transactional_email_status import keyed_message_id
 from products.messaging.backend.tests.fake_cdp_api import _response
 from products.workflows.backend.facade.api import set_default_email_sender_if_unset
 from products.workflows.backend.facade.models import HogFlow
@@ -53,26 +50,44 @@ BATCH_URL = "/api/messaging/send/email_batch/"
 SINGLE_URL = "/api/messaging/send/email/"
 MESSAGE_ID = "0196a8f0-0000-7000-8000-000000000001"
 SECOND_MESSAGE_ID = "0196a8f0-0000-7000-8000-000000000002"
-ACCEPTED = {"status": 202, "body": {"invocation_id": MESSAGE_ID, "replayed": False}}
+ACCEPTED = {
+    "status": 202,
+    "body": {
+        "invocation_id": MESSAGE_ID,
+        "status": "queued",
+        "scheduled_at": None,
+        "replayed": False,
+        "attachment_count": 0,
+        "attachment_bytes": 0,
+    },
+}
 RECIPIENT = {"to": "a@example.com", "idempotency_key": "key-a"}
 
-PIPELINE_STATUSES = {
-    "quota_limited": 429,
-    "idempotency_key_in_flight": 409,
-    "idempotency_key_reused": 422,
-    "sending_suspended": 422,
-    "sending_paused": 422,
-    "recipient_suppressed": 422,
-    "recipient_unreachable": 422,
-    "sandbox_recipient_not_member": 422,
-    "sandbox_sender_unavailable": 403,
-}
-PIPELINE_ANSWERS = [
-    *((code, PIPELINE_STATUSES.get(code, 400)) for code in PIPELINE_REFUSALS),
-    ("a 400 without a known code", 400),
-    ("message_too_large", 413),
-    ("intake_unavailable", 503),
-    ("Workflow not found", 404),
+WHOLE_CALL_REFUSALS = [
+    ("batch_unavailable", 409, "batch_unavailable", 409, True),
+    ("quota_limited", 429, "quota_limited", 429, True),
+    ("sending_suspended", 422, "sending_suspended", 422, True),
+    ("sending_paused", 422, "sending_paused", 422, True),
+    ("sandbox_sender_unavailable", 403, "sandbox_sender_unavailable", 403, True),
+    ("sandbox_fields_unsupported", 400, "invalid_request", 400, False),
+    ("not_sendable", 400, "transactional_email_paused", 400, True),
+    ("invalid_request", 400, "invalid_request", 400, True),
+    ("Expected string, received number", 400, "invalid_request", 400, True),
+    ("too_large", 413, "content_too_large", 413, False),
+]
+RECIPIENT_REFUSALS = [
+    ("idempotency_key_reused", 422, "idempotency_key_reused", 422, True),
+    ("sandbox_recipient_not_member", 422, "sandbox_recipient_not_member", 422, True),
+    ("invalid_request", 400, "invalid_request", 400, True),
+    ("a 400 without a known code", 400, "invalid_recipient", 400, True),
+    ("message_too_large", 413, "content_too_large", 400, True),
+    ("recipient_unreachable", 422, "invalid_recipient", 400, True),
+    ("intake_unavailable", 503, "delivery_unavailable", 503, True),
+    ("recipient_suppressed", 422, "delivery_unavailable", 503, True),
+    ("idempotency_key_in_flight", 409, "delivery_unavailable", 503, True),
+    ("not_attempted", 503, "delivery_unavailable", 503, True),
+    ("idempotency_key_reused", 422, "idempotency_key_reused", 422, False),
+    ("intake_unavailable", 503, "delivery_unavailable", 503, False),
 ]
 
 
@@ -255,6 +270,10 @@ class TestTransactionalEmailBatch(APIBaseTest):
         assert "{ or }" in refused["error"]["detail"]
         assert queued == {"message_id": MESSAGE_ID, "status": "queued", "replayed": False}
         assert malformed["error"]["code"] == "invalid_recipient"
+        assert [refused["message_id"], malformed["message_id"]] == [
+            str(keyed_message_id(self.team.id, "key-0")),
+            str(keyed_message_id(self.team.id, "key-2")),
+        ]
         assert [recipient["to"] for recipient in _forwarded(mock_post.call_args)["recipients"]] == ["user1@example.com"]
 
     @parameterized.expand(
@@ -500,7 +519,7 @@ class TestTransactionalEmailBatch(APIBaseTest):
         assert "Recipient 0" in response.json()["detail"]
 
     @parameterized.expand([("template",), ("code",)])
-    def test_a_disabled_workflow_still_forwards_and_each_answer_maps_to_its_recipient(
+    def test_a_disabled_workflow_still_forwards_and_the_pipeline_refuses_the_whole_batch(
         self, mock_post, _flag, _capture, form
     ):
         if form == "code":
@@ -510,63 +529,64 @@ class TestTransactionalEmailBatch(APIBaseTest):
         else:
             hog_flow_id = self.hog_flow_id
         self._archive(hog_flow_id)
-        mock_post.return_value = _batch_answer(
-            {"status": 202, "body": {"invocation_id": MESSAGE_ID, "replayed": True}},
-            {"status": 400, "body": {"error": "not_sendable"}},
-            {"status": 503, "body": {"error": "not_attempted"}},
-            {"status": 503, "body": {"error": "delivery_unavailable", "may_still_go_out": False}},
-            {"status": 503, "body": {"may_still_go_out": False}},
-        )
+        mock_post.return_value = _response(400, {"error": "not_sendable"})
 
-        response = self._batch(form, self._recipients(5))
+        response = self._batch(form, self._recipients(2))
 
-        assert response.status_code == status.HTTP_200_OK, response.json()
-        replayed, refused, unstarted, not_queued, unrecognized = response.json()["results"]
-        assert replayed == {"message_id": MESSAGE_ID, "status": "queued", "replayed": True}
-        assert {name: refused["error"][name] for name in ("code", "status", "retryable")} == {
-            "code": "transactional_email_paused",
-            "status": 400,
-            "retryable": False,
-        }
-        assert [
-            {name: result["error"][name] for name in ("code", "detail", "status", "retryable")}
-            for result in (unstarted, not_queued, unrecognized)
-        ] == [
-            {"code": "not_attempted", "detail": NOT_ATTEMPTED_EMAIL, "status": 503, "retryable": True},
-            {"code": "delivery_unavailable", "detail": NOT_QUEUED_EMAIL, "status": 503, "retryable": True},
-            {"code": "delivery_unavailable", "detail": UNCONFIRMED_EMAIL, "status": 503, "retryable": True},
-        ]
-        assert all(
-            "again with the same `idempotency_key` within 24 hours of the first request that used it"
-            in result["error"]["detail"]
-            for result in (unstarted, not_queued, unrecognized)
-        )
-        assert [
-            "may still go out" in result["error"]["detail"] for result in (unstarted, not_queued, unrecognized)
-        ] == [
-            False,
-            False,
-            True,
-        ]
+        assert (response.status_code, response.json()["code"]) == (400, "transactional_email_paused")
         assert f"/hog_flows/{hog_flow_id}/" in mock_post.call_args.args[0]
 
-    @parameterized.expand(PIPELINE_ANSWERS)
-    def test_each_recipient_gets_the_answer_a_single_send_gets_for_the_same_refusal(
-        self, mock_post, _flag, _capture, pipeline_code, pipeline_status
+    @parameterized.expand(WHOLE_CALL_REFUSALS)
+    def test_a_whole_call_refusal_answers_as_a_single_send_does(
+        self, mock_post, _flag, capture, pipeline_code, pipeline_status, public_code, public_status, as_single_send
     ):
         mock_post.return_value = _response(pipeline_status, {"error": pipeline_code})
-        single = self._single("template")
-        mock_post.return_value = _batch_answer({"status": pipeline_status, "body": {"error": pipeline_code}})
+        single = self._single("code")
+        capture.reset_mock()
 
-        (result,) = self._batch("template", self._recipients(1)).json()["results"]
+        response = self._batch("code")
 
-        assert (result["error"]["code"], result["error"]["status"]) == (single.json()["code"], single.status_code)
-        assert result["error"]["retryable"] == (single.status_code in (409, 429, 503))
+        assert (response.status_code, response.json()["code"]) == (public_status, public_code)
+        assert "results" not in response.json()
+        assert (response.json() == single.json()) == as_single_send
+        if pipeline_code == "sandbox_fields_unsupported":
+            assert "sandbox sender" in response.json()["detail"]
+        assert [
+            (call.kwargs["properties"]["outcome"], call.kwargs["properties"]["error_code"])
+            for call in capture.call_args_list
+        ] == [("rejected", public_code)]
+
+    @parameterized.expand(RECIPIENT_REFUSALS)
+    def test_each_recipient_refusal_maps_to_its_public_code_and_keeps_its_message_id(
+        self, mock_post, _flag, _capture, pipeline_code, pipeline_status, public_code, public_status, answers_id
+    ):
+        refusal: dict[str, Any] = {"error": pipeline_code}
+        if answers_id:
+            refusal["invocation_id"] = SECOND_MESSAGE_ID
+        mock_post.return_value = _batch_answer(ACCEPTED, {"status": pipeline_status, "body": refusal})
+
+        response = self._batch("template", self._recipients(2))
+
+        assert response.status_code == status.HTTP_200_OK, response.json()
+        queued, refused = response.json()["results"]
+        assert queued == {"message_id": MESSAGE_ID, "status": "queued", "replayed": False}
+        assert refused["message_id"] == (
+            SECOND_MESSAGE_ID if answers_id else str(keyed_message_id(self.team.id, "key-1"))
+        )
+        assert {name: refused["error"][name] for name in ("code", "status", "retryable")} == {
+            "code": public_code,
+            "status": public_status,
+            "retryable": public_code == "delivery_unavailable",
+        }
+        if public_code == "delivery_unavailable":
+            assert refused["error"]["detail"] == UNCONFIRMED_EMAIL
 
     @parameterized.expand(
         [
             ("pod_without_batch_routes", {"return_value": _response(401, {"error": "Unauthorized"})}),
             ("pipeline_error", {"return_value": _response(500, {})}),
+            ("a_server_error_with_a_code", {"return_value": _response(500, {"error": "internal_error"})}),
+            ("a_missed_deadline", {"return_value": _response(503, {"error": "deadline_exceeded"})}),
             ("an_unknown_refusal", {"return_value": _response(503, {"error": "some_new_refusal"})}),
             ("timeout", {"side_effect": requests.ReadTimeout()}),
             ("an_answer_missing", {"return_value": _batch_answer(ACCEPTED)}),
@@ -628,18 +648,19 @@ class TestTransactionalEmailBatch(APIBaseTest):
                 },
             ),
             (
-                "an_answer_that_is_refused_and_queued",
+                "a_refusal_with_an_invocation_id_that_is_not_a_uuid",
                 {
                     "return_value": _batch_answer(
-                        ACCEPTED,
-                        {"status": 422, "body": {"error": "recipient_suppressed", "invocation_id": SECOND_MESSAGE_ID}},
+                        ACCEPTED, {"status": 422, "body": {"error": "idempotency_key_reused", "invocation_id": "x"}}
                     )
                 },
             ),
+            ("a_whole_call_refusal_as_a_server_error", {"return_value": _response(503, {"error": "quota_limited"})}),
             (
-                "an_answer_with_a_server_error_and_a_definite_refusal",
-                {"return_value": _batch_answer(ACCEPTED, {"status": 500, "body": {"error": "recipient_suppressed"}})},
+                "a_recipient_refusal_for_the_whole_call",
+                {"return_value": _response(422, {"error": "idempotency_key_reused"})},
             ),
+            ("a_missing_team", {"return_value": _response(404, {"error": "Team not found"})}),
             (
                 "an_answer_with_a_success_status_and_a_refusal",
                 {"return_value": _batch_answer(ACCEPTED, {"status": 200, "body": {"error": "recipient_suppressed"}})},
@@ -737,11 +758,40 @@ class TestTransactionalEmailBatch(APIBaseTest):
 
         if single.status_code == status.HTTP_202_ACCEPTED:
             assert batch.status_code == status.HTTP_200_OK, batch.json()
-            assert batch.json()["warnings"] == single.json()["warnings"]
+            assert batch.json()["warnings"] == [
+                {**warning, "message": BATCH_SANDBOX_SENDER_WARNING} for warning in single.json()["warnings"]
+            ]
             (batch_call,) = mock_post.call_args_list
             assert _forwarded(batch_call)["send"] == single_send
         else:
             assert (batch.status_code, batch.json()) == (single.status_code, single.json())
+
+    @parameterized.expand(
+        [
+            ("every_recipient_from_the_sandbox_sender", "template", "email_sandbox", "email_sandbox", True),
+            ("only_a_replay_from_the_sandbox_sender", "code", None, "email_sandbox", True),
+            ("every_recipient_from_its_own_sender", "template", None, None, False),
+        ]
+    )
+    def test_warns_once_when_any_queued_recipient_went_out_from_the_sandbox_sender(
+        self, mock_post, _flag, _capture, _name, form, queued_sender_kind, replayed_sender_kind, warns
+    ):
+        mock_post.return_value = _batch_answer(
+            {"status": 202, "body": {**ACCEPTED["body"], "sender_kind": queued_sender_kind}},
+            {
+                "status": 202,
+                "body": {"invocation_id": SECOND_MESSAGE_ID, "replayed": True, "sender_kind": replayed_sender_kind},
+            },
+            {"status": 422, "body": {"error": "sandbox_recipient_not_member"}},
+        )
+
+        response = self._batch(form, self._recipients(3))
+
+        assert response.status_code == status.HTTP_200_OK, response.json()
+        warnings = response.json().get("warnings", [])
+        assert [(warning["code"], warning["message"]) for warning in warnings] == (
+            [("sandbox_sender", BATCH_SANDBOX_SENDER_WARNING)] if warns else []
+        )
 
     @parameterized.expand([("verified_sender", True), ("sandbox_sender", False)])
     def test_a_code_batch_with_no_recipient_it_can_address_creates_nothing(

@@ -9,6 +9,7 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import datetime
 from email.utils import parseaddr
+from functools import cache
 from typing import Any, Literal, Protocol
 from uuid import UUID
 
@@ -37,11 +38,14 @@ from products.messaging.backend.facade.contracts import (
     AttachmentUploadTarget,
     BatchNotAdmitted,
     BatchRecipient,
+    BatchTooLarge,
+    BatchUnavailable,
     CodeEmail,
     ContentTooLarge,
     DeliveryUnavailable,
     EmailAttachment,
     EmailBatchSent,
+    EmailNotQueued,
     EmailTracking,
     FieldNotAccepted,
     IdempotencyKeyInFlight,
@@ -65,8 +69,6 @@ from products.messaging.backend.facade.contracts import (
     SenderUnavailable,
     SendingPaused,
     SendingSuspended,
-    SendNotAttempted,
-    SendNotQueued,
     SendWarning,
     SendWarningCode,
     SensitiveTemplate,
@@ -81,6 +83,7 @@ from products.messaging.backend.models import FirstCodeSend, MessageCategory, Me
 from products.messaging.backend.models.message_category import MessageCategoryType
 from products.messaging.backend.services.code_email_source import source_detection_enabled
 from products.messaging.backend.services.html_text import text_from_html
+from products.messaging.backend.services.transactional_email_status import keyed_message_id
 from products.messaging.backend.tasks import detect_code_email_source_task
 from products.workflows.backend.facade.api import WorkflowNotFound, get_workflow_summary
 from products.workflows.backend.facade.sandbox_email import provision_sandbox_sender
@@ -244,11 +247,37 @@ PIPELINE_REFUSALS: dict[str, tuple[type[TransactionalEmailError], str]] = {
         "The sandbox sender isn't available for this organization, so this email wasn't sent. Verify a sending "
         "domain at {setup_url} to send email.",
     ),
+    "batch_unavailable": (
+        BatchUnavailable,
+        "Batch sends aren't available for this project yet, so PostHog didn't send any of these emails. Send each "
+        "email on its own instead.",
+    ),
 }
+
+BATCH_REFUSALS = frozenset(
+    {
+        "batch_unavailable",
+        "quota_limited",
+        "sending_suspended",
+        "sending_paused",
+        "not_sendable",
+        "sandbox_sender_unavailable",
+    }
+)
+RECIPIENT_REFUSALS = frozenset({"idempotency_key_reused", "sandbox_recipient_not_member"})
+BATCH_INVALID_RECIPIENT = (
+    "PostHog can't send to this recipient as given. Check its `to`, `distinct_id` and `message_data`, then send it "
+    "again."
+)
 
 SANDBOX_SENDER_KIND = "email_sandbox"
 SANDBOX_SENDER_WARNING = (
     "This email went out from PostHog's sandbox sender, because this project has no verified sending domain. The "
+    "sandbox sender only sends to members of your organization. Verify a sending domain to send to anyone from your "
+    "own address."
+)
+BATCH_SANDBOX_SENDER_WARNING = (
+    "PostHog accepted these emails from its sandbox sender, because this project has no verified sending domain. The "
     "sandbox sender only sends to members of your organization. Verify a sending domain to send to anyone from your "
     "own address."
 )
@@ -693,23 +722,23 @@ def send_email_batch(
 
 
 def send_code_email_batch(team: Team, email: CodeEmail, recipients: Sequence[BatchRecipient]) -> EmailBatchSent:
-    refusals = tuple(recipient.refusal for recipient in recipients if recipient.refusal is not None)
-    if len(refusals) == len(recipients):
+    if all(recipient.refusal is not None for recipient in recipients):
         with transactional_email_stage("workflow_lookup"):
             _code_send_sender(team, email, provision_sandbox=False)
             if _code_template_workflow_id(team.id, email) is None:
                 _require_key_room(team.id, email.key)
-        return EmailBatchSent(results=refusals)
+        return EmailBatchSent(
+            results=tuple(
+                _refused_recipient(team.id, recipient, recipient.refusal)
+                for recipient in recipients
+                if recipient.refusal is not None
+            )
+        )
     with transactional_email_stage("workflow_lookup"):
-        accepted_send, sandbox_warning = _accepted_send(team, email)
+        accepted_send = _accepted_send(team, email)[0]
         hog_flow_id = _code_template_workflow_id(team.id, email) or _key_workflow_id(team.id, email.key)
     return _queue_batch(
-        team.id,
-        hog_flow_id,
-        {"send": accepted_send},
-        recipients,
-        send_accepted_transactional_email_batch,
-        sandbox_warning=sandbox_warning,
+        team.id, hog_flow_id, {"send": accepted_send}, recipients, send_accepted_transactional_email_batch
     )
 
 
@@ -878,37 +907,22 @@ def _queue(
         raise DeliveryUnavailable() from e
     _observe_cdp_call(time.monotonic() - started_at)
     CDP_SEND_RESULTS.labels(result=_cdp_response_result(response.status_code)).inc()
-    return _queued_email(
-        team_id,
-        hog_flow_id,
-        response.status_code,
-        _answer(response),
-        has_attachments=bool((payload.get("send") or {}).get("attachments")),
-        sandbox_warning=sandbox_warning,
-    )
 
-
-def _queued_email(
-    team_id: int,
-    hog_flow_id: UUID,
-    status_code: int,
-    answer: dict[str, Any],
-    *,
-    has_attachments: bool,
-    sandbox_warning: SendWarning | None,
-) -> QueuedEmail:
+    answer = _answer(response)
     refusal_code = _refusal_code(answer)
-    if has_attachments and (attachment_refusal := _attachment_refusal(refusal_code, answer)):
+    if (payload.get("send") or {}).get("attachments") and (
+        attachment_refusal := _attachment_refusal(refusal_code, answer)
+    ):
         raise attachment_refusal
-    if status_code == 413:
+    if response.status_code == 413:
         raise ContentTooLarge(
             "The email is larger than PostHog can send. Make its content or data smaller, and link to "
             "large images and files instead of embedding them."
         )
-    if status_code != 202:
+    if response.status_code != 202:
         if sandbox_warning is not None and refusal_code == "sandbox_recipient_not_member":
             SANDBOX_FALLBACKS.labels(outcome="recipient_not_member").inc()
-        unknown_field = _send_field_an_older_pipeline_refused(refusal_code) if status_code == 400 else None
+        unknown_field = _send_field_an_older_pipeline_refused(refusal_code) if response.status_code == 400 else None
         if unknown_field is not None:
             logger.warning(
                 "transactional_email_field_not_accepted",
@@ -918,14 +932,14 @@ def _queued_email(
             )
             raise FieldNotAccepted(unknown_field)
         refusal = PIPELINE_REFUSALS.get(refusal_code or "")
-        if refusal is None and status_code == 400:
+        if refusal is None and response.status_code == 400:
             refusal = PIPELINE_REFUSALS["invalid_request"]
         if refusal is None or refusal[0] is InvalidRequest:
             logger.error(
                 "transactional_email_queue_rejected",
                 team_id=team_id,
                 hog_flow_id=str(hog_flow_id),
-                status_code=status_code,
+                status_code=response.status_code,
                 refusal_code=refusal_code,
             )
         if refusal is None:
@@ -956,19 +970,22 @@ def _queue_batch(
     shared: dict[str, Any],
     recipients: Sequence[BatchRecipient],
     post: _PipelinePost,
-    *,
-    sandbox_warning: SendWarning | None = None,
 ) -> EmailBatchSent:
-    payloads = [_batch_recipient_payload(recipient) for recipient in recipients if recipient.refusal is None]
-    answers = iter(_batch_answers(team_id, hog_flow_id, {**shared, "recipients": payloads}, post) if payloads else ())
+    sent = [recipient for recipient in recipients if recipient.refusal is None]
+    payload = {**shared, "recipients": [_batch_recipient_payload(recipient) for recipient in sent]}
+    answers = iter(_batch_answers(team_id, hog_flow_id, payload, sent, post) if sent else ())
     results = tuple(
-        recipient.refusal
-        if recipient.refusal is not None
-        else _batch_result(team_id, hog_flow_id, next(answers), sandbox_warning)
+        _refused_recipient(team_id, recipient, recipient.refusal) if recipient.refusal is not None else next(answers)
         for recipient in recipients
     )
-    sent_from_sandbox = any(isinstance(result, QueuedEmail) and result.warnings for result in results)
-    return EmailBatchSent(results=results, warnings=(sandbox_warning,) if sandbox_warning and sent_from_sandbox else ())
+    warnings = next((result.warnings for result in results if isinstance(result, QueuedEmail) and result.warnings), ())
+    return EmailBatchSent(results=results, warnings=warnings)
+
+
+def _refused_recipient(
+    team_id: int, recipient: BatchRecipient, error: TransactionalEmailError | DeliveryUnavailable
+) -> EmailNotQueued:
+    return EmailNotQueued(message_id=str(keyed_message_id(team_id, recipient.idempotency_key)), error=error)
 
 
 def _batch_recipient_payload(recipient: BatchRecipient) -> dict[str, Any]:
@@ -979,8 +996,12 @@ def _batch_recipient_payload(recipient: BatchRecipient) -> dict[str, Any]:
 
 
 def _batch_answers(
-    team_id: int, hog_flow_id: UUID, payload: dict[str, Any], post: _PipelinePost
-) -> list[tuple[int, dict[str, Any]]]:
+    team_id: int,
+    hog_flow_id: UUID,
+    payload: dict[str, Any],
+    recipients: Sequence[BatchRecipient],
+    post: _PipelinePost,
+) -> tuple[QueuedEmail | EmailNotQueued, ...]:
     started_at = time.monotonic()
     try:
         response = post(team_id, str(hog_flow_id), payload, timeout=BATCH_TIMEOUT_SECONDS)
@@ -991,47 +1012,105 @@ def _batch_answers(
         raise DeliveryUnavailable() from e
     CDP_BATCH_DURATION.observe(time.monotonic() - started_at)
     answer = _answer(response)
-    answers = _batch_answer_list(answer, len(payload["recipients"])) if response.status_code == 200 else None
-    if answers is not None:
+    results = _read_batch_answer(team_id, recipients, answer) if response.status_code == 200 else None
+    if results is not None:
         CDP_BATCH_RESULTS.labels(result="success").inc()
-        return answers
+        return results
     CDP_BATCH_RESULTS.labels(
         result="malformed" if response.status_code == 200 else f"{response.status_code // 100}xx"
     ).inc()
+    refusal_code = _refusal_code(answer)
+    if response.status_code == 413:
+        raise BatchTooLarge()
+    if response.status_code == 400 and refusal_code == "sandbox_fields_unsupported":
+        raise InvalidRequest(SANDBOX_FIELDS_UNSUPPORTED.format(setup_url=sending_domain_setup(team_id).setup_url))
+    if 400 <= response.status_code < 500 and refusal_code in BATCH_REFUSALS:
+        raise _pipeline_refusal(refusal_code, lambda: sending_domain_setup(team_id).setup_url)
     logger.error(
         "transactional_email_batch_queue_rejected",
         team_id=team_id,
         hog_flow_id=str(hog_flow_id),
         status_code=response.status_code,
-        refusal_code=_refusal_code(answer),
+        refusal_code=refusal_code if response.status_code != 400 or refusal_code in PIPELINE_REFUSALS else None,
     )
-    if response.status_code == 503 and _refusal_code(answer) == "over_capacity":
+    if response.status_code == 400:
+        raise _pipeline_refusal("invalid_request", lambda: sending_domain_setup(team_id).setup_url)
+    if response.status_code == 503 and refusal_code == "over_capacity":
         raise BatchNotAdmitted()
     raise DeliveryUnavailable()
 
 
-def _batch_answer_list(answer: dict[str, Any], expected: int) -> list[tuple[int, dict[str, Any]]] | None:
-    results = answer.get("results")
-    if not isinstance(results, list) or len(results) != expected:
+def _read_batch_answer(
+    team_id: int, recipients: Sequence[BatchRecipient], answer: dict[str, Any]
+) -> tuple[QueuedEmail | EmailNotQueued, ...] | None:
+    answered = answer.get("results")
+    if not isinstance(answered, list) or len(answered) != len(recipients):
         return None
-    answers: list[tuple[int, dict[str, Any]]] = []
-    for result in results:
+    sandbox_warning = cache(lambda: _sandbox_sender_warning(team_id, BATCH_SANDBOX_SENDER_WARNING))
+    setup_url = cache(lambda: sending_domain_setup(team_id).setup_url)
+    results: list[QueuedEmail | EmailNotQueued] = []
+    for recipient, result in zip(recipients, answered):
         status_code, body = (result.get("status"), result.get("body")) if isinstance(result, dict) else (None, None)
         if not isinstance(status_code, int) or isinstance(status_code, bool) or not isinstance(body, dict):
             return None
-        if status_code != 202 and not 400 <= status_code <= 599:
+        invocation_id = body.get("invocation_id")
+        if invocation_id is not None and not _is_message_id(invocation_id):
             return None
-        if status_code >= 500 and _refusal_code(body) in PIPELINE_REFUSALS:
+        refusal_code = _refusal_code(body)
+        if status_code == 202:
+            if invocation_id is None or "error" in body or not isinstance(body.get("replayed"), bool):
+                return None
+            from_sandbox = body.get("sender_kind") == SANDBOX_SENDER_KIND
+            if from_sandbox and not body["replayed"]:
+                SANDBOX_FALLBACKS.labels(outcome="sandbox").inc()
+            results.append(
+                QueuedEmail(
+                    message_id=invocation_id,
+                    replayed=body["replayed"],
+                    warnings=(sandbox_warning(),) if from_sandbox else (),
+                )
+            )
+            continue
+        if not 400 <= status_code <= 599:
             return None
-        if status_code != 202 and "invocation_id" in body:
-            return None
-        if status_code == 202 and (
-            "error" in body
-            or not (_is_message_id(body.get("invocation_id")) and isinstance(body.get("replayed"), bool))
-        ):
-            return None
-        answers.append((status_code, body))
-    return answers
+        error: TransactionalEmailError | DeliveryUnavailable
+        unexpected = False
+        if status_code == 413:
+            error = ContentTooLarge(
+                "The email is larger than PostHog can send. Make its content or data smaller, and link to large "
+                "images and files instead of embedding them."
+            )
+        elif status_code == 400 and refusal_code == "invalid_request":
+            error = _pipeline_refusal(refusal_code, setup_url)
+        elif status_code == 400:
+            error = InvalidRecipient(BATCH_INVALID_RECIPIENT)
+            unexpected, refusal_code = True, None
+        elif refusal_code == "recipient_unreachable" and status_code < 500:
+            error = InvalidRecipient("PostHog can't send to this address. Check it for a typo.")
+        elif refusal_code in RECIPIENT_REFUSALS and status_code < 500:
+            if refusal_code == "sandbox_recipient_not_member":
+                SANDBOX_FALLBACKS.labels(outcome="recipient_not_member").inc()
+            error = _pipeline_refusal(refusal_code, setup_url)
+        else:
+            error = DeliveryUnavailable()
+        if unexpected or isinstance(error, InvalidRequest | DeliveryUnavailable):
+            logger.error(
+                "transactional_email_batch_recipient_rejected",
+                team_id=team_id,
+                status_code=status_code,
+                refusal_code=refusal_code,
+            )
+        results.append(
+            EmailNotQueued(message_id=invocation_id, error=error)
+            if invocation_id is not None
+            else _refused_recipient(team_id, recipient, error)
+        )
+    return tuple(results)
+
+
+def _pipeline_refusal(code: str, setup_url: Callable[[], str]) -> TransactionalEmailError:
+    error_class, message = PIPELINE_REFUSALS[code]
+    return error_class(message.format(setup_url=setup_url()) if "{setup_url}" in message else message)
 
 
 def _is_message_id(value: Any) -> bool:
@@ -1042,23 +1121,6 @@ def _is_message_id(value: Any) -> bool:
     except ValueError:
         return False
     return True
-
-
-def _batch_result(
-    team_id: int, hog_flow_id: UUID, answer: tuple[int, dict[str, Any]], sandbox_warning: SendWarning | None
-) -> QueuedEmail | TransactionalEmailError | DeliveryUnavailable:
-    status_code, body = answer
-    refusal_code = _refusal_code(body)
-    if status_code == 503 and refusal_code == "not_attempted":
-        return SendNotAttempted()
-    if status_code == 503 and refusal_code == "delivery_unavailable" and body.get("may_still_go_out") is False:
-        return SendNotQueued()
-    try:
-        return _queued_email(
-            team_id, hog_flow_id, status_code, body, has_attachments=False, sandbox_warning=sandbox_warning
-        )
-    except (TransactionalEmailError, DeliveryUnavailable) as e:
-        return e
 
 
 def _attachment_refusal(refusal_code: str | None, answer: dict[str, Any]) -> TransactionalEmailError | None:
@@ -1086,7 +1148,7 @@ def _explanation(answer: dict[str, Any], key: str) -> str | None:
     return value if isinstance(value, str) and value.strip() else None
 
 
-def _sandbox_sender_warning(team_id: int) -> SendWarning:
+def _sandbox_sender_warning(team_id: int, message: str = SANDBOX_SENDER_WARNING) -> SendWarning:
     setup = sending_domain_setup(team_id)
     if setup.unverified_sender_id is None:
         agent_action = (
@@ -1103,7 +1165,7 @@ def _sandbox_sender_warning(team_id: int) -> SendWarning:
         )
     return SendWarning(
         code=SendWarningCode.SANDBOX_SENDER,
-        message=SANDBOX_SENDER_WARNING,
+        message=message,
         setup_url=setup.setup_url,
         agent_action=agent_action,
     )

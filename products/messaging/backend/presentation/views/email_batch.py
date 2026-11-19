@@ -21,11 +21,9 @@ from products.messaging.backend.facade.transactional_email import (
     BatchRecipient,
     DeliveryUnavailable,
     EmailBatchSent,
+    EmailNotQueued,
     InvalidRecipient,
     QueuedEmail,
-    SendNotAttempted,
-    SendNotQueued,
-    TransactionalEmailError,
 )
 from products.messaging.backend.presentation.views.code_send_fields import (
     CODE_SEND_EXTRA_FIELDS,
@@ -48,16 +46,9 @@ BATCH_REFUSED_FIELDS = ("scheduled_at", *CODE_SEND_EXTRA_FIELDS)
 FIELDS_THAT_FAIL_ONE_RECIPIENT = frozenset({"to", "distinct_id"})
 RECIPIENT_FIELDS_OUTSIDE_RECIPIENTS = {"to": "to", "distinct_id": "distinct_id", "identifiers": "distinct_id"}
 RECIPIENT_FIELDS = frozenset({"to", "distinct_id", "message_data", "idempotency_key"})
-RETRYABLE_CODES = frozenset({"idempotency_key_in_flight", "quota_limited", "delivery_unavailable", "not_attempted"})
-RETRY_WITH_THE_SAME_KEY = (
-    "Send it again with the same `idempotency_key` within 24 hours of the first request that used it, so it goes out "
-    "once"
-)
-UNCONFIRMED_EMAIL = f"The email pipeline did not confirm this email, so it may still go out. {RETRY_WITH_THE_SAME_KEY}."
-NOT_ATTEMPTED_EMAIL = f"PostHog stopped before this request sent the email. {RETRY_WITH_THE_SAME_KEY} even if an earlier request queued it."
-NOT_QUEUED_EMAIL = (
-    f"The email pipeline failed before this request queued the email. {RETRY_WITH_THE_SAME_KEY} even if an earlier "
-    "request queued it."
+UNCONFIRMED_EMAIL = (
+    "The email pipeline did not confirm this email, so it may still go out. Send it again with the same "
+    "`idempotency_key` within 24 hours of the first request that used it, so it goes out once."
 )
 
 
@@ -251,25 +242,35 @@ class EmailBatchResultStatus(LabeledStrEnum):
 
 class EmailBatchErrorSerializer(serializers.Serializer):
     code = serializers.CharField(
-        help_text="Why this recipient's email wasn't queued, the code a single send would answer, such as "
-        "`recipient_suppressed`. `not_attempted` means PostHog stopped before this request sent the email."
+        help_text="Why this recipient's email wasn't queued: `invalid_recipient`, `invalid_request`, "
+        "`content_too_large`, `idempotency_key_reused`, `sandbox_recipient_not_member`, or `delivery_unavailable` "
+        "when the email pipeline didn't confirm it, so it may still go out."
     )
     detail = serializers.CharField(help_text="What happened and what to do next, in words a person can read.")
     status = serializers.IntegerField(help_text="The HTTP status a single send of this email would answer.")
     retryable = serializers.BooleanField(
-        help_text="True when sending it again with the same `idempotency_key` can succeed."
+        help_text="True when sending it again with the same `idempotency_key` can succeed. Only "
+        "`delivery_unavailable` is retryable."
     )
 
 
 class EmailBatchResultSerializer(serializers.Serializer):
-    message_id = serializers.CharField(required=False, help_text="ID of the queued email. Absent with `error`.")
+    message_id = serializers.CharField(
+        help_text="ID of this recipient's email, the same for every send with its `idempotency_key`. Read the "
+        "email's status with it, also when the result is an error."
+    )
     status = serializers.ChoiceField(
-        choices=EmailBatchResultStatus.choices, required=False, help_text="`queued` when the email was queued."
+        choices=EmailBatchResultStatus.choices,
+        required=False,
+        help_text="`queued` when PostHog accepted the email. The email can still be skipped later, for example "
+        "when the address is on the suppression list, so read its status to see whether it went out. Absent with "
+        "`error`.",
     )
     replayed = serializers.BooleanField(
         required=False,
-        help_text="True when an earlier request with the same `idempotency_key` already queued this email. No new "
-        "email was sent, and `message_id` is the earlier send's ID.",
+        help_text="True when an earlier request with the same `idempotency_key` already queued this email, so no "
+        "new email was sent. False doesn't prove this request sent it: an earlier request may still be on its way. "
+        "Absent with `error`.",
     )
     error = EmailBatchErrorSerializer(required=False, help_text="Why this email wasn't queued. Absent when it was.")
 
@@ -295,15 +296,29 @@ EMAIL_BATCH_RESPONSES: dict[int, ResponseDeclaration] = {
         description="The batch was read. Each result says whether that recipient's email was queued.",
     ),
     400: OpenApiResponse(
-        description="The shared email is invalid or can't be sent, a recipient has no valid `idempotency_key` or "
+        description="The shared email is invalid or can't be sent, its workflow isn't active, a recipient has no valid `idempotency_key` or "
         "shares one with another recipient, a field a batch doesn't take is present, there are more than "
         f"{BATCH_MAX_RECIPIENTS} recipients, or the shared content or `message_data` is over 256 KiB"
     ),
+    403: OpenApiResponse(description="The sandbox sender isn't available for this organization, so nothing was sent"),
     404: OpenApiResponse(description="Template not found, or batch sends aren't available for this project"),
-    413: OpenApiResponse(description="The request body is over 5 MiB"),
+    409: OpenApiResponse(
+        description="Batch sends aren't available for this project yet, so nothing was sent. Send each email on its "
+        "own instead"
+    ),
+    413: OpenApiResponse(
+        description="The request body is over 5 MiB, or the batch is larger than the email pipeline takes at once"
+    ),
     415: OpenApiResponse(description="The request body isn't JSON"),
-    429: OpenApiResponse(description="The batch would go over the send rate limit, so nothing was sent"),
-    503: OpenApiResponse(description="The email pipeline did not confirm the batch. Some of its emails may go out"),
+    422: OpenApiResponse(description="Email sending is suspended for this project, or paused for this email"),
+    429: OpenApiResponse(
+        description="The batch would go over the send rate limit, or the project is over its email quota, so "
+        "nothing was sent"
+    ),
+    503: OpenApiResponse(
+        description="The email pipeline did not confirm the batch. Some of its emails may go out. Read each "
+        "recipient's status by its `idempotency_key`"
+    ),
 }
 
 
@@ -374,6 +389,16 @@ def batch_body_too_large() -> ExplainedRefusal:
     )
 
 
+def batch_too_large_to_send() -> ExplainedRefusal:
+    return ExplainedRefusal(
+        "The batch is larger than PostHog can send at once, so PostHog didn't send it.",
+        code="content_too_large",
+        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+        why="The email pipeline takes a limited amount of data in one batch.",
+        fix="Split the recipients into smaller batches.",
+    )
+
+
 def batch_not_admitted() -> ExplainedRefusal:
     return ExplainedRefusal(
         "The email pipeline was at capacity and turned this batch away. Send the batch again with the same "
@@ -413,35 +438,32 @@ def email_batch_response(sent: EmailBatchSent) -> dict[str, Any]:
     ).data
 
 
-def email_batch_outcome(result: QueuedEmail | TransactionalEmailError | DeliveryUnavailable) -> dict[str, Any]:
+def email_batch_outcome(result: QueuedEmail | EmailNotQueued) -> dict[str, Any]:
     if isinstance(result, QueuedEmail):
         outcome: dict[str, Any] = {"outcome": "replayed" if result.replayed else "queued"}
         if result.warnings:
             outcome["warning_codes"] = [warning.code for warning in result.warnings]
         return outcome
-    if isinstance(result, SendNotAttempted):
-        return {"outcome": "not_attempted"}
-    if isinstance(result, SendNotQueued):
-        return {"outcome": "not_queued"}
-    if isinstance(result, DeliveryUnavailable):
+    if isinstance(result.error, DeliveryUnavailable):
         return {"outcome": "unavailable"}
-    return {"outcome": "rejected", "error_code": result.code}
+    return {"outcome": "rejected", "error_code": result.error.code}
 
 
-def _result(result: QueuedEmail | TransactionalEmailError | DeliveryUnavailable) -> dict[str, Any]:
+def _result(result: QueuedEmail | EmailNotQueued) -> dict[str, Any]:
     if isinstance(result, QueuedEmail):
         return {"message_id": result.message_id, "status": EmailBatchResultStatus.QUEUED, "replayed": result.replayed}
-    status_code: int
-    if isinstance(result, SendNotAttempted):
-        code, detail, status_code = "not_attempted", NOT_ATTEMPTED_EMAIL, status.HTTP_503_SERVICE_UNAVAILABLE
-    elif isinstance(result, SendNotQueued):
-        code, detail, status_code = "delivery_unavailable", NOT_QUEUED_EMAIL, status.HTTP_503_SERVICE_UNAVAILABLE
-    elif isinstance(result, DeliveryUnavailable):
-        code, detail, status_code = "delivery_unavailable", UNCONFIRMED_EMAIL, status.HTTP_503_SERVICE_UNAVAILABLE
+    if isinstance(result.error, DeliveryUnavailable):
+        error = {
+            "code": "delivery_unavailable",
+            "detail": UNCONFIRMED_EMAIL,
+            "status": status.HTTP_503_SERVICE_UNAVAILABLE,
+            "retryable": True,
+        }
     else:
-        code, detail = result.code, str(result)
+        code = result.error.code
         status_code = TransactionalEmailRejected.STATUS_BY_CODE.get(code, status.HTTP_400_BAD_REQUEST)
-    return {"error": {"code": code, "detail": detail, "status": status_code, "retryable": code in RETRYABLE_CODES}}
+        error = {"code": code, "detail": str(result.error), "status": status_code, "retryable": False}
+    return {"message_id": result.message_id, "error": error}
 
 
 def _shown(name: str) -> str:

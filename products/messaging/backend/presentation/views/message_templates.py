@@ -794,6 +794,7 @@ class TransactionalEmailRejected(exceptions.ValidationError):
         "recipient_unreachable": 422,
         "sandbox_recipient_not_member": 422,
         "sandbox_sender_unavailable": 403,
+        "batch_unavailable": 409,
     }
     # The caller has to change the request. Without this the error handler types it `validation_error`.
     default_type = "invalid_request"

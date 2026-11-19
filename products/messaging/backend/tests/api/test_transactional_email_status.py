@@ -1,11 +1,11 @@
 from datetime import UTC, datetime, timedelta
-from uuid import NAMESPACE_URL, uuid5
+from uuid import UUID
 
 import time_machine
 from posthog.test.base import APIBaseTest, ClickhouseTestMixin
 from unittest.mock import patch
 
-from django.test import override_settings
+from django.test import SimpleTestCase, override_settings
 
 from parameterized import parameterized
 from rest_framework import status
@@ -19,6 +19,7 @@ from posthog.models.utils import generate_random_token_secret
 from posthog.uuidt import UUIDT
 
 from products.messaging.backend.models.email_status_sql import EMAIL_STATUS_DATA_TABLE
+from products.messaging.backend.services.transactional_email_status import keyed_message_id
 
 # The read only compares versions, so these ranks must keep the writer's order but not its values. A status only
 # moves forward, and a later status of the same rank wins by its time.
@@ -141,11 +142,13 @@ class TestTransactionalEmailStatus(ClickhouseTestMixin, APIBaseTest):
         [
             ("project_path", "/api/projects/{team_id}/messaging/emails/{message_id}/"),
             ("key_scoped_path", "/api/messaging/emails/{message_id}/"),
+            ("project_lookup_by_id", "/api/projects/{team_id}/messaging/emails/status/?message_id={message_id}"),
+            ("key_scoped_lookup_by_key", "/api/messaging/emails/status/?idempotency_key=order-%227%22%5Cshipped"),
         ]
     )
     def test_reports_a_keyed_send_whose_id_holds_no_time(self, _flag, _name, path):
         # A keyed send's id is a name-based UUID, so only its stored rows say when it was queued.
-        self.message_id = str(uuid5(NAMESPACE_URL, "a-key"))
+        self.message_id = str(keyed_message_id(self.team.id, 'order-"7"\\shipped'))
         self._status_rows([("queued", 0, ""), ("sent", 2, "")])
 
         response = self.client.get(path.format(team_id=self.team.id, message_id=self.message_id))
@@ -163,7 +166,7 @@ class TestTransactionalEmailStatus(ClickhouseTestMixin, APIBaseTest):
     @override_settings(CLICKHOUSE_EVENTS_OFFLINE_HOST="events-cluster.invalid")
     def test_reads_a_status_when_the_project_reads_the_native_events_table(self, _flag, _name, keyed):
         if keyed:
-            self.message_id = str(uuid5(NAMESPACE_URL, "a-key"))
+            self.message_id = str(keyed_message_id(self.team.id, "a-key"))
         self._status_rows([("queued", 0, ""), ("sent", 2, "")])
 
         with override_instance_config("CLICKHOUSE_HOGQL_USE_NEW_EVENTS_SCHEMA_TEAMS", str(self.team.pk)):
@@ -193,6 +196,23 @@ class TestTransactionalEmailStatus(ClickhouseTestMixin, APIBaseTest):
 
         assert response.status_code == status.HTTP_404_NOT_FOUND
         assert capture.call_args.kwargs["properties"]["outcome"] == "not_found"
+
+    @parameterized.expand(
+        [
+            ("neither_id", "", status.HTTP_400_BAD_REQUEST),
+            ("both_ids", "message_id={message_id}&idempotency_key=a-key", status.HTTP_400_BAD_REQUEST),
+            ("a_key_with_a_space", "idempotency_key=a%20key", status.HTTP_400_BAD_REQUEST),
+            ("a_key_of_no_send", "idempotency_key=another-key", status.HTTP_404_NOT_FOUND),
+            ("a_key_of_another_projects_send", "idempotency_key=a-key", status.HTTP_404_NOT_FOUND),
+        ]
+    )
+    def test_a_lookup_names_exactly_one_email_it_can_report(self, _flag, _name, query, expected_status):
+        self.message_id = str(keyed_message_id(self.team.id + 1, "a-key"))
+        self._status_rows([("queued", 0, "")])
+
+        response = self.client.get(f"/api/messaging/emails/status/?{query.format(message_id=self.message_id)}")
+
+        assert response.status_code == expected_status, response.json()
 
     @parameterized.expand(
         [
@@ -240,3 +260,15 @@ class TestTransactionalEmailStatus(ClickhouseTestMixin, APIBaseTest):
         response = self.client.get(self._url(self.message_id))
 
         assert response.status_code == expected_status
+
+
+class TestKeyedMessageId(SimpleTestCase):
+    @parameterized.expand(
+        [
+            ("an_order_key", 1, "order-123", "2ee0494d-1ddd-5853-a93f-a383618e78eb"),
+            ("a_key_with_a_colon", 2, "welcome:user-42", "8d483bc2-0218-5ce3-8012-a788d40916d6"),
+            ("a_key_with_characters_json_escapes", 2, 'order-"7"\\shipped', "d64aed1a-7827-5c71-bea6-8afab3f0b113"),
+        ]
+    )
+    def test_derives_the_id_the_cdp_service_gives_a_keyed_send(self, _name, team_id, key, expected):
+        assert keyed_message_id(team_id, key) == UUID(expected)
