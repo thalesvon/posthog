@@ -69,9 +69,17 @@ class BatchJSONParser(BaseParser):
         if len(body) > BATCH_BODY_MAX_BYTES:
             return UnreadBody(batch_body_too_large())
         try:
-            value = json.loads(body, parse_constant=_refused_constant, parse_float=_finite, parse_int=_finite_int)
+            value = json.loads(
+                body,
+                object_pairs_hook=_members,
+                parse_constant=_refused_constant,
+                parse_float=_finite,
+                parse_int=_finite_int,
+            )
         except ValueError as e:
             return UnreadBody(ParseError(f"JSON parse error - {e}"))
+        except RecursionError:
+            return UnreadBody(ParseError("JSON parse error - the body nests too deeply."))
         try:
             json.dumps(value, ensure_ascii=False).encode()
         except UnicodeEncodeError:
@@ -82,6 +90,13 @@ class BatchJSONParser(BaseParser):
                 )
             )
         return value
+
+
+def _members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    members = dict(pairs)
+    if len(members) != len(pairs):
+        raise ValueError("an object names the same member twice")
+    return members
 
 
 def _refused_constant(text: str) -> float:

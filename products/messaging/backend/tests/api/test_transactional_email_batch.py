@@ -433,6 +433,8 @@ class TestTransactionalEmailBatch(APIBaseTest):
             ("constant_that_is_not_json", "NaN", 400, "parse_error"),
             ("number_beyond_a_float", "1e400", 400, "parse_error"),
             ("integer_beyond_a_float", "1" + "0" * 400, 400, "parse_error"),
+            ("member_named_twice", '"Welcome", "subject": "Welcome again"', 400, "parse_error"),
+            ("nesting_too_deep", "[" * 100_000 + "]" * 100_000, 400, "parse_error"),
             ("cut_off_over_the_batch_cap", '"' + "x" * 6 * 1024 * 1024, 413, "content_too_large"),
         ]
     )
