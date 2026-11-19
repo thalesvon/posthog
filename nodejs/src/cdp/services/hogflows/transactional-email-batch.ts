@@ -2,21 +2,16 @@ import { EventEmitter } from 'events'
 import { Counter, Histogram } from 'prom-client'
 import { z } from 'zod'
 
-import { logger } from '~/common/utils/logger'
-
-import { PublishSettlement, publishesSettled } from '../../intake/intake-producer'
-import { Semaphore } from '../../utils/sempahore'
 import { BatchSendSchema, TransactionalEmailOutcome, TransactionalEmailRequestSchema } from './transactional-email'
 
 export const TEMPLATE_BATCH_TOKEN_CLAIMS = { kind: 'template_batch' }
 export const CODE_SEND_BATCH_TOKEN_CLAIMS = { kind: 'code_send_batch' }
 
 export const BATCH_MAX_RECIPIENTS = 100
-export const BATCH_FAN_OUT = 25
 
-// Django drops a forwarded call after 30 s, so a batch that answers later returns none of its results. The cap leaves
-// 5 s for the answer to travel back and for Django to read it.
-const BATCH_DEADLINE_MAX_MS = 25_000
+// Bounds the body read and the shared lookups. Django drops a forwarded call after 30 s, so a batch that answers later
+// returns none of its results. The cap leaves 10 s for the checks, the sandbox read, the broker's acks and the trip back.
+const BATCH_DEADLINE_MAX_MS = 20_000
 
 export const batchDeadlineMs = (setting: number): number => {
     if (!Number.isInteger(setting) || setting <= 0 || setting > BATCH_DEADLINE_MAX_MS) {
@@ -30,7 +25,7 @@ export const batchDeadlineMs = (setting: number): number => {
 const Variables = z.record(z.string(), z.any())
 const IdempotencyKey = z.string().min(1).max(255)
 
-// The address and the person are checked per recipient, so one bad recipient refuses only its own slot.
+// The address and the person are checked per recipient, so one bad recipient refuses only its own result.
 const BatchRecipient = z.object({ to: z.unknown(), distinct_id: z.unknown(), idempotency_key: IdempotencyKey })
 
 const hasUniqueKeys = (recipients: { idempotency_key: string }[]): boolean =>
@@ -88,7 +83,7 @@ export const BatchSlotRequestSchema = TransactionalEmailRequestSchema.omit({ sch
     send: BatchSendSchema.optional(),
 })
 
-// The same request a single send to this recipient makes, so a single send and a batch slot replay each other.
+// The same request a single send to this recipient makes, so a single send and a batch recipient replay each other.
 export const slotRequestOf = (batch: TransactionalEmailBatchRequest, recipient: BatchRecipient): unknown => ({
     to: recipient.to,
     distinct_id: recipient.distinct_id,
@@ -97,30 +92,11 @@ export const slotRequestOf = (batch: TransactionalEmailBatchRequest, recipient: 
     ...(batch.send && { send: batch.send }),
 })
 
-export type SlotOutcome = TransactionalEmailOutcome | 'not_sendable' | 'deadline_running' | 'not_attempted'
-export type SlotReply = { outcome: SlotOutcome; status: number; body: Record<string, unknown> }
-
-export type BatchSlot = {
-    settlement: PublishSettlement
-    // Called before the step that can queue the email, so a later failure answers "may still go out".
-    mayCommit: () => void
-}
-
-export const NOT_ATTEMPTED: SlotReply = { outcome: 'not_attempted', status: 503, body: { error: 'not_attempted' } }
-const unconfirmed = (outcome: SlotOutcome): SlotReply => ({
-    outcome,
-    status: 503,
-    body: { error: 'delivery_unavailable', may_still_go_out: true },
-})
-const FAILED_BEFORE_COMMIT: SlotReply = {
-    outcome: 'error',
-    status: 503,
-    body: { error: 'delivery_unavailable', may_still_go_out: false },
-}
+export type SlotReply = { outcome: TransactionalEmailOutcome; status: number; body: Record<string, unknown> }
 
 export const transactionalEmailBatchRequestsTotal = new Counter({
     name: 'cdp_transactional_email_batch_requests_total',
-    help: 'Batch email requests from Django, by outcome: answered (with a result per recipient), over_capacity (the pod already ran its share of batches), abandoned (the caller left before its body arrived), or a whole-call refusal before any recipient ran. Recipients count in cdp_transactional_email_requests_total with route batch.',
+    help: 'Batch email requests from Django, by outcome: answered (with a result per recipient), over_capacity (the pod already ran its share of batches), batch_unavailable (the team is not on async intake), abandoned (the caller left before its body arrived), or another whole-call refusal, which produces nothing. Recipients count in cdp_transactional_email_requests_total with route batch.',
     labelNames: ['outcome'],
 })
 
@@ -131,15 +107,9 @@ export const transactionalEmailBatchDurationMs = new Histogram({
 })
 
 export class BatchCapacity {
-    readonly slots: Semaphore
     private admitted = 0
 
-    constructor(
-        private readonly maxRequests: number,
-        maxSlots: number
-    ) {
-        this.slots = new Semaphore(maxSlots)
-    }
+    constructor(private readonly maxRequests: number) {}
 
     admit(): (() => void) | null {
         if (this.admitted >= this.maxRequests) {
@@ -188,60 +158,16 @@ export const readBatchBody = (
         )
     })
 
-const whenAborted = (signal: AbortSignal): Promise<void> =>
-    new Promise((resolve) =>
-        signal.aborted ? resolve() : signal.addEventListener('abort', () => resolve(), { once: true })
-    )
-
-// Answers by the deadline: a recipient still running "may still go out", and one not started is not_attempted. A
-// recipient past the deadline keeps running and holds its permit until it and its publishes settle, as `settled` does.
-export const runBatchSlots = async <T>(
-    items: readonly T[],
-    runSlot: (item: T, slot: BatchSlot) => Promise<SlotReply>,
-    { slots, fanOut, deadline }: { slots: Semaphore; fanOut: number; deadline: AbortSignal }
-): Promise<{ replies: SlotReply[]; settled: Promise<void> }> => {
-    const replies: (SlotReply | undefined)[] = items.map(() => undefined)
-    const started = items.map(() => false)
-    let next = 0
-    let answered = 0
-    let allAnswered: () => void = () => {}
-    const everyRecipientAnswered = new Promise<void>((resolve) => (allAnswered = resolve))
-
-    const runOne = async (i: number): Promise<void> => {
-        started[i] = true
-        const settlement = new PublishSettlement()
-        let mayHaveCommitted = false
-        try {
-            replies[i] = await runSlot(items[i], {
-                settlement,
-                mayCommit: () => (mayHaveCommitted = true),
-            })
-        } catch (error) {
-            logger.error('Error sending a batch email recipient', {
-                error: error instanceof Error ? error.message : String(error),
-            })
-            replies[i] = mayHaveCommitted ? unconfirmed('error') : FAILED_BEFORE_COMMIT
-        }
-        if (++answered === items.length) {
-            allAnswered()
-        }
-        await publishesSettled(settlement)
+// The work keeps running past the deadline, so its later failure must not go unhandled.
+export const withinDeadline = <T>(work: Promise<T>, deadline: AbortSignal): Promise<T | 'deadline_exceeded'> => {
+    work.catch(() => undefined)
+    if (deadline.aborted) {
+        return Promise.resolve('deadline_exceeded')
     }
-    const worker = async (): Promise<void> => {
-        while (next < items.length && !deadline.aborted) {
-            const i = next++
-            try {
-                await slots.run(() => runOne(i), deadline)
-            } catch {
-                // The deadline passed while this recipient waited for a permit, so it never started.
-            }
-        }
-    }
-
-    const settled = Promise.all(Array.from({ length: Math.min(fanOut, items.length) }, worker)).then(() => undefined)
-    await Promise.race([everyRecipientAnswered, settled, whenAborted(deadline)])
-    return {
-        replies: items.map((_, i) => replies[i] ?? (started[i] ? unconfirmed('deadline_running') : NOT_ATTEMPTED)),
-        settled,
-    }
+    let expired: () => void = () => {}
+    const aborted = new Promise<'deadline_exceeded'>((resolve) => {
+        expired = () => resolve('deadline_exceeded')
+        deadline.addEventListener('abort', expired, { once: true })
+    })
+    return Promise.race([work, aborted]).finally(() => deadline.removeEventListener('abort', expired))
 }

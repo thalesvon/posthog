@@ -297,7 +297,7 @@ export type TransactionalEmailOutcome =
 
 export const transactionalEmailRequestsTotal = new Counter({
     name: 'cdp_transactional_email_requests_total',
-    help: 'Answers to Django for a transactional email, by outcome and route: `single` counts a request, `batch` counts each recipient of a batch. It records the answer, not the delivery: after `intake_unavailable`, `deadline_running` or `error`, the email may still go out.',
+    help: 'Answers to Django for a transactional email, by outcome and route: `single` counts a request, `batch` counts each recipient of a batch. It records the answer, not the delivery: after `intake_unavailable` or `error`, the email may still go out.',
     labelNames: ['outcome', 'route'],
 })
 
@@ -317,7 +317,7 @@ export type TransactionalEmailStage = (typeof TRANSACTIONAL_EMAIL_STAGES)[number
 
 export const transactionalEmailStageDurationMs = new Histogram({
     name: 'cdp_transactional_email_stage_duration_ms',
-    help: 'Milliseconds one transactional email request, or one recipient of a batch (route `batch`), spends in each stage: auth (the JWT), validate (the body), load (the team and the workflow), build (the run and its idempotency fingerprint), idempotency (every Idempotency-Key call to Valkey), checks (suspension, pause, suppression, quota and MX), attachments (verifying the files and estimating the message, only for a send with files), queue_insert (the email queue insert), intake_produce (the produce to the intake topic and the wait for its ack, in intake async mode), metrics_flush (the hand-off of the result and status rows to the Kafka producer, without the wait for the broker), and total. A request records only the stages it reached, so a refusal shows in the stage that refused it.',
+    help: 'Milliseconds one transactional email request, or one batch (route `batch`), spends in each stage: auth (the JWT), validate (the body), load (the team and the workflow), build (the run and its idempotency fingerprint), idempotency (every Idempotency-Key call to Valkey), checks (suspension, pause, suppression, quota and MX), attachments (verifying the files and estimating the message, only for a send with files), queue_insert (the email queue insert), intake_produce (the produce to the intake topic and the wait for its ack, in intake async mode), metrics_flush (the hand-off of the result and status rows to the Kafka producer, without the wait for the broker), and total. A request records only the stages it reached, so a refusal shows in the stage that refused it.',
     labelNames: ['stage', 'route'],
     buckets: [1, 2.5, 5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000],
 })

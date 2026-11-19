@@ -21,7 +21,6 @@ import {
     HealthCheckResultOk,
     PluginServerService,
     PluginsServerConfig,
-    Team,
 } from '../types'
 import { getAsyncFunctionHandler, getRegisteredAsyncFunctionNames } from './async-function-registry'
 import './async-functions'
@@ -80,10 +79,7 @@ import {
     transactionalEmailRequestsTotal,
 } from './services/hogflows/transactional-email'
 import {
-    BATCH_FAN_OUT,
     BatchCapacity,
-    BatchRecipient,
-    BatchSlot,
     BatchSlotRequestSchema,
     CODE_SEND_BATCH_TOKEN_CLAIMS,
     CodeSendBatchRequestSchema,
@@ -93,15 +89,17 @@ import {
     TransactionalEmailBatchRequest,
     batchDeadlineMs,
     readBatchBody,
-    runBatchSlots,
     slotRequestOf,
     transactionalEmailBatchDurationMs,
     transactionalEmailBatchRequestsTotal,
+    withinDeadline,
 } from './services/hogflows/transactional-email-batch'
 import {
+    KeyedTransactionalEmailRequest,
     ScheduledTransactionalSends,
     TransactionalSendResult,
     TransactionalSends,
+    transactionalEmailRunId,
 } from './services/hogflows/transactional-sends'
 import { InvocationResultsService } from './services/invocation-results.service'
 import { IdempotentJobQueue, JobQueue } from './services/job-queue/job-queue.interface'
@@ -130,6 +128,7 @@ import { RecipientTokensService } from './services/messaging/recipient-tokens.se
 import {
     SANDBOX_CODE_SEND_REFUSAL_STATUS,
     refuseSandboxCodeSend,
+    refuseSandboxCodeSends,
     senderOfCodeSend,
 } from './services/messaging/sandbox/sandbox-code-send'
 import { SandboxFeedbackService } from './services/messaging/sandbox/sandbox-feedback.service'
@@ -149,7 +148,6 @@ import {
     CyclotronPerson,
     HogFunctionInvocationGlobals,
     HogFunctionType,
-    IntegrationType,
     MinimalLogEntry,
 } from './types'
 import {
@@ -376,12 +374,6 @@ const BODY_READ_REFUSAL_STATUS = { too_large: 413, invalid_request: 400, deadlin
 
 type BatchAdmission = { release: () => void; deadline: AbortSignal; arrivedAt: number }
 
-type BatchLookups = {
-    team: Promise<Team | null>
-    hogFlow: Promise<HogFlow | null>
-    sender: Promise<IntegrationType | null>
-}
-
 const sendBodies = (invocation: CyclotronJobInvocationHogFlow): MessageBodies => {
     const sendFields = acceptedSendEmailFields(invocation.state.send)
     return {
@@ -557,10 +549,7 @@ export class CdpApi {
             'transactional-email',
             config.CDP_IDEMPOTENCY_VALKEY_ENABLED
         )
-        this.transactionalEmailBatchCapacity = new BatchCapacity(
-            config.CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_REQUESTS,
-            config.CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_SLOTS
-        )
+        this.transactionalEmailBatchCapacity = new BatchCapacity(config.CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_REQUESTS)
         this.attachmentUploads = new AttachmentUploads(services.attachmentStore, deps.idempotencyValkey ?? null, {
             teams: config.CDP_EMAIL_ATTACHMENTS_TEAMS,
             maxBytesPerTeamDay: config.CDP_EMAIL_ATTACHMENTS_UPLOAD_MAX_BYTES_PER_TEAM_DAY,
@@ -1692,6 +1681,10 @@ export class CdpApi {
                 transactionalEmailBatchRequestsTotal.inc({ outcome: 'unauthorized' })
                 return
             }
+            // A batch answers on the broker's ack, so a team whose sends still insert on the request path gets none.
+            if (intakeModeOf(this.config)(parseInt(req.params.team_id)) !== 'async') {
+                return refuse('batch_unavailable', 409, { error: 'batch_unavailable' })
+            }
             const deadline = deadlineAfter(this.transactionalEmailBatchDeadlineMs)
             const release = this.transactionalEmailBatchCapacity.admit()
             if (!release) {
@@ -1729,14 +1722,17 @@ export class CdpApi {
         })
     }
 
-    // Each recipient runs as its own single send with its own claim, so a retry of a partly accepted batch replays the
-    // accepted recipients.
     private postTransactionalEmailBatch =
         (schema: z.ZodType<TransactionalEmailBatchRequest, unknown>) =>
         async (req: ModifiedRequest, res: express.Response): Promise<any> => {
             const { release, deadline, arrivedAt } = res.locals.transactionalEmailBatch as BatchAdmission
-            let settled: Promise<void> = Promise.resolve()
+            const stages = new TransactionalEmailStageTimer('batch')
+            const refuse = (outcome: string, status: number, body: Record<string, unknown>) => {
+                transactionalEmailBatchRequestsTotal.inc({ outcome })
+                return res.status(status).json(body)
+            }
             try {
+                stages.start('validate')
                 const parsed = schema.safeParse(req.body)
                 if (!parsed.success) {
                     logger.warn('⚠️', 'Transactional email batch failed validation', {
@@ -1744,105 +1740,82 @@ export class CdpApi {
                         hog_flow_id: req.params.id,
                         issues: parsed.error.issues.map((issue) => ({ path: issue.path.join('.'), code: issue.code })),
                     })
-                    transactionalEmailBatchRequestsTotal.inc({ outcome: 'invalid_request' })
-                    return res.status(400).json({ error: parsed.error.message })
+                    return refuse('invalid_request', 400, { error: parsed.error.message })
                 }
                 const batch = parsed.data
                 const teamId = parseInt(req.params.team_id)
-                // Started once for every recipient, and awaited only by a recipient whose key recalls nothing, so a
-                // retry of an accepted recipient replays even after its workflow changed.
-                const lookups: BatchLookups = {
-                    team: this.deps.teamManager.getTeam(teamId),
-                    hogFlow: this.hogFlowManager.getHogFlowCheckingPrimaryOnMiss(req.params.id),
-                    sender: batch.send?.from
-                        ? this.deps.integrationManager.getCheckingPrimaryOnMiss(batch.send.from.integrationId)
-                        : Promise.resolve(null),
-                }
-                for (const lookup of Object.values(lookups)) {
-                    lookup.catch(() => undefined)
-                }
-                const sends = this.transactionalSendsForRequest()
-                const run = await runBatchSlots(
-                    batch.recipients,
-                    (recipient, slot) =>
-                        this.sendBatchRecipient(sends, teamId, req.params.id, batch, recipient, lookups, slot),
-                    { slots: this.transactionalEmailBatchCapacity.slots, fanOut: BATCH_FAN_OUT, deadline }
+
+                stages.start('load')
+                const loaded = await withinDeadline(
+                    Promise.all([
+                        this.deps.teamManager.getTeam(teamId),
+                        this.hogFlowManager.getHogFlowCheckingPrimaryOnMiss(req.params.id),
+                        batch.send?.from
+                            ? this.deps.integrationManager.getCheckingPrimaryOnMiss(batch.send.from.integrationId)
+                            : Promise.resolve(null),
+                    ]),
+                    deadline
                 )
-                settled = run.settled
-                for (const { outcome } of run.replies) {
-                    transactionalEmailRequestsTotal.inc({ outcome, route: 'batch' })
+                if (loaded === 'deadline_exceeded') {
+                    return refuse('deadline_exceeded', 503, { error: 'deadline_exceeded' })
                 }
+                const [team, hogFlow, integration] = loaded
+                if (!team) {
+                    return refuse('not_found', 404, { error: 'Team not found' })
+                }
+                // A single send answers 404 here, which Django retries. A batch refuses for good: the workflow is gone
+                // for every recipient.
+                if (!hogFlow || hogFlow.team_id !== team.id || hogFlow.trigger?.type !== 'api') {
+                    return refuse('not_sendable', 400, { error: 'not_sendable' })
+                }
+
+                stages.start('validate')
+                const replies: (SlotReply | undefined)[] = []
+                const keyed: KeyedTransactionalEmailRequest[] = []
+                for (const recipient of batch.recipients) {
+                    const request = BatchSlotRequestSchema.safeParse(slotRequestOf(batch, recipient))
+                    if (request.success) {
+                        keyed.push(request.data)
+                        replies.push(undefined)
+                    } else {
+                        replies.push(invalidSendReplyOf(request.error, { team_id: teamId, hog_flow_id: hogFlow.id }))
+                    }
+                }
+                const sender = batch.send ? senderOfCodeSend(team.id, batch.send, integration) : undefined
+                const accepted = await this.transactionalSendsForRequest().acceptBatch(
+                    team,
+                    hogFlow,
+                    keyed,
+                    stages,
+                    sender
+                )
+                if ('refused' in accepted) {
+                    return refuse(accepted.refused, TRANSACTIONAL_SEND_REFUSAL_STATUS[accepted.refused], {
+                        error: accepted.refused,
+                    })
+                }
+                const acceptedReplies = accepted.results.map(sendReplyOf)
+                const results = batch.recipients.map((recipient, i) => {
+                    const { outcome, status, body } = replies[i] ?? acceptedReplies.shift()!
+                    transactionalEmailRequestsTotal.inc({ outcome, route: 'batch' })
+                    return {
+                        status,
+                        body: { invocation_id: transactionalEmailRunId(team.id, recipient.idempotency_key), ...body },
+                    }
+                })
                 transactionalEmailBatchRequestsTotal.inc({ outcome: 'answered' })
-                return res.status(200).json({ results: run.replies.map(({ status, body }) => ({ status, body })) })
+                return res.status(200).json({ results })
             } catch (e) {
                 logger.error('Error running a transactional email batch', {
                     error: e instanceof Error ? e.message : String(e),
                 })
-                transactionalEmailBatchRequestsTotal.inc({ outcome: 'error' })
-                return res.status(500).json({ error: e instanceof Error ? e.message : String(e) })
+                return refuse('error', 500, { error: e instanceof Error ? e.message : String(e) })
             } finally {
+                stages.finish()
                 transactionalEmailBatchDurationMs.observe(performance.now() - arrivedAt)
-                void settled.finally(release)
+                release()
             }
         }
-
-    private async sendBatchRecipient(
-        sends: TransactionalSends,
-        teamId: number,
-        hogFlowId: string,
-        batch: TransactionalEmailBatchRequest,
-        recipient: BatchRecipient,
-        lookups: BatchLookups,
-        slot: BatchSlot
-    ): Promise<SlotReply> {
-        const stages = new TransactionalEmailStageTimer('batch')
-        try {
-            stages.start('validate')
-            const parsed = BatchSlotRequestSchema.safeParse(slotRequestOf(batch, recipient))
-            if (!parsed.success) {
-                return invalidSendReplyOf(parsed.error, { team_id: teamId, hog_flow_id: hogFlowId })
-            }
-            const request = parsed.data
-            const recalled = await sends.recall(teamId, hogFlowId, request, stages, lookups.sender).catch((error) => {
-                slot.mayCommit()
-                throw error
-            })
-            if (recalled) {
-                return sendReplyOf(recalled)
-            }
-            stages.start('load')
-            const team = await lookups.team
-            if (!team) {
-                return { outcome: 'not_found', status: 404, body: { error: 'Team not found' } }
-            }
-            const hogFlow = await lookups.hogFlow
-            // A single send answers 404 here, which Django retries. A batch answers each recipient for good: the
-            // workflow is gone for every one of them.
-            if (!hogFlow || hogFlow.team_id !== team.id || hogFlow.trigger?.type !== 'api') {
-                return { outcome: 'not_sendable', status: 400, body: { error: 'not_sendable' } }
-            }
-            const sender = request.send ? senderOfCodeSend(team.id, request.send, await lookups.sender) : undefined
-            slot.mayCommit()
-            return sendReplyOf(
-                await sends.accept(
-                    team,
-                    hogFlow,
-                    request,
-                    stages,
-                    {
-                        shape: null,
-                        sizeMessageBodies: (invocation, emailStep, deadline) =>
-                            this.messageBodyBytes(hogFlow, invocation, emailStep, deadline),
-                        deadline: deadlineAfter(ATTACHMENT_VERIFICATION_DEADLINE_MS),
-                    },
-                    sender,
-                    slot.settlement
-                )
-            )
-        } finally {
-            stages.finish()
-        }
-    }
 
     private async messageBodyBytes(
         hogFlow: HogFlow,
@@ -1999,6 +1972,13 @@ export class CdpApi {
                     enabled: this.config.WORKFLOWS_SANDBOX_SENDER_ENABLED,
                     teamId,
                     recipient,
+                    tenantName: this.config.SES_SANDBOX_TENANT_NAME,
+                }),
+            refuseSandboxSends: (teamId, recipients) =>
+                refuseSandboxCodeSends(this.deps.postgres, {
+                    enabled: this.config.WORKFLOWS_SANDBOX_SENDER_ENABLED,
+                    teamId,
+                    recipients,
                     tenantName: this.config.SES_SANDBOX_TENANT_NAME,
                 }),
         })

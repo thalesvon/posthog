@@ -2,7 +2,7 @@ import { PostgresRouter } from '~/common/utils/db/postgres'
 
 import { IntegrationType } from '../../../types'
 import { AcceptedSend } from '../../hogflows/transactional-email'
-import { readSandboxAuthorization } from './sandbox-authorization'
+import { SandboxAuthorization, readSandboxAuthorizations } from './sandbox-authorization'
 import { admitTenant } from './sandbox-tenant-admission'
 
 export type SandboxCodeSendRefusal =
@@ -41,17 +41,32 @@ export function senderOfCodeSend(
 
 export async function refuseSandboxCodeSend(
     db: PostgresRouter,
+    { recipient, ...request }: { enabled: boolean; teamId: number; recipient: string; tenantName: string }
+): Promise<SandboxCodeSendRefusal | null> {
+    return (await refuseSandboxCodeSends(db, { ...request, recipients: [recipient] }))[0]
+}
+
+export async function refuseSandboxCodeSends(
+    db: PostgresRouter,
     {
         enabled,
         teamId,
-        recipient,
+        recipients,
         tenantName,
-    }: { enabled: boolean; teamId: number; recipient: string; tenantName: string }
-): Promise<SandboxCodeSendRefusal | null> {
+    }: { enabled: boolean; teamId: number; recipients: string[]; tenantName: string }
+): Promise<(SandboxCodeSendRefusal | null)[]> {
     if (!enabled) {
-        return 'sandbox_sender_unavailable'
+        return recipients.map(() => 'sandbox_sender_unavailable')
     }
-    const authorization = await readSandboxAuthorization(db, { teamId, recipient: recipient.trim(), tenantName })
+    const authorizations = await readSandboxAuthorizations(db, {
+        teamId,
+        recipients: recipients.map((recipient) => recipient.trim()),
+        tenantName,
+    })
+    return authorizations.map(refusalOf)
+}
+
+function refusalOf(authorization: SandboxAuthorization): SandboxCodeSendRefusal | null {
     if (!authorization.ok) {
         switch (authorization.reason) {
             case 'not_member':
