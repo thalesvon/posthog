@@ -10,6 +10,12 @@ _BATCH_SIZE = 500
 _EXPERIMENT = "experiment"
 _SUMMARIZER = "summarizer"
 
+# Which store a migrated row came from, recorded on the scope so the backward step restores the
+# right one. A legacy column-targeted summarizer is indistinguishable from a migrated native row by
+# its config alone: both are summarizers carrying a prompt.
+_FROM_NATIVE = "scanner_config"
+_FROM_COLUMN = "experiment_targeting"
+
 # The `scanner_config` keys that the scope replaces. Everything else a native experiment scanner
 # holds (`prompt`, `length`) belongs to the answer format and stays.
 _CONFIG_SCOPE_KEYS = ("experiment_id", "variants", "balance_variants", "start_on_launch")
@@ -62,40 +68,46 @@ def migrate_scanners_onto_scope(apps, schema_editor):
     now = timezone.now()
     last_pk = None
     while True:
-        rows = ReplayScanner.objects.order_by("pk")
-        if last_pk is not None:
-            rows = rows.filter(pk__gt=last_pk)
-        batch = list(rows.only("id", "scanner_type", "scanner_config", "experiment_targeting", "scope")[:_BATCH_SIZE])
-        if not batch:
-            return
-        last_pk = batch[-1].pk
-        changed = []
-        for scanner in batch:
-            # Idempotent: a row that already carries a migrated scope is left exactly as it is, so a
-            # retried or resumed run neither rewrites it nor moves `migrated_at`. Checked before any
-            # derivation, so a re-run reads each migrated row once and computes nothing for it.
-            if isinstance(scanner.scope, dict) and scanner.scope.get("migrated_at"):
-                continue
-            config = scanner.scanner_config if isinstance(scanner.scanner_config, dict) else {}
-            targeting = scanner.experiment_targeting if isinstance(scanner.experiment_targeting, dict) else {}
-            if scanner.scanner_type == _EXPERIMENT:
-                scope = _scope_from_native_config(config)
-                if scope is None:
-                    # An experiment-type row naming no experiment cannot build a scanner either, so
-                    # there is nothing to carry across. Left alone for a person to look at.
-                    continue
-                scanner.scanner_config = {k: v for k, v in config.items() if k not in _CONFIG_SCOPE_KEYS}
-                scanner.scanner_type = _SUMMARIZER
-            elif targeting:
-                scope = _scope_from_targeting(targeting)
-                if scope is None:
-                    continue
-            else:
-                continue
-            scanner.scope = {**scope, "migrated_at": now.isoformat()}
-            changed.append(scanner)
-        # Each batch commits alone, so a scanner edit or a sweep waits on at most one batch's locks.
+        # Read and write in one transaction with the batch locked, so a scanner saved between the
+        # two does not lose its edit to a stale copy. The stamp would make a retry skip that row.
+        # Each batch commits alone, so an edit or a sweep waits on at most one batch's locks.
         with transaction.atomic():
+            rows = ReplayScanner.objects.order_by("pk").select_for_update(of=("self",))
+            if last_pk is not None:
+                rows = rows.filter(pk__gt=last_pk)
+            batch = list(
+                rows.only("id", "scanner_type", "scanner_config", "experiment_targeting", "scope")[:_BATCH_SIZE]
+            )
+            if not batch:
+                return
+            last_pk = batch[-1].pk
+            changed = []
+            for scanner in batch:
+                # Idempotent: a row that already carries a migrated scope is left exactly as it is, so a
+                # retried or resumed run neither rewrites it nor moves `migrated_at`. Checked before any
+                # derivation, so a re-run reads each migrated row once and computes nothing for it.
+                if isinstance(scanner.scope, dict) and scanner.scope.get("migrated_at"):
+                    continue
+                config = scanner.scanner_config if isinstance(scanner.scanner_config, dict) else {}
+                targeting = scanner.experiment_targeting if isinstance(scanner.experiment_targeting, dict) else {}
+                if scanner.scanner_type == _EXPERIMENT:
+                    scope = _scope_from_native_config(config)
+                    if scope is None:
+                        # An experiment-type row naming no experiment cannot build a scanner either, so
+                        # there is nothing to carry across. Left alone for a person to look at.
+                        continue
+                    scanner.scanner_config = {k: v for k, v in config.items() if k not in _CONFIG_SCOPE_KEYS}
+                    scanner.scanner_type = _SUMMARIZER
+                    migrated_from = _FROM_NATIVE
+                elif targeting:
+                    scope = _scope_from_targeting(targeting)
+                    if scope is None:
+                        continue
+                    migrated_from = _FROM_COLUMN
+                else:
+                    continue
+                scanner.scope = {**scope, "migrated_at": now.isoformat(), "migrated_from": migrated_from}
+                changed.append(scanner)
             ReplayScanner.objects.bulk_update(changed, ["scanner_type", "scanner_config", "scope"])
 
 
@@ -107,41 +119,44 @@ def restore_scanners_from_scope(apps, schema_editor):
     ReplayScanner = apps.get_model("replay_vision", "ReplayScanner")
     last_pk = None
     while True:
-        rows = ReplayScanner.objects.order_by("pk")
-        if last_pk is not None:
-            rows = rows.filter(pk__gt=last_pk)
-        batch = list(rows.only("id", "scanner_type", "scanner_config", "experiment_targeting", "scope")[:_BATCH_SIZE])
-        if not batch:
-            return
-        last_pk = batch[-1].pk
-        changed = []
-        for scanner in batch:
-            scope = scanner.scope
-            if not isinstance(scope, dict) or not scope.get("migrated_at"):
-                continue
-            config = scanner.scanner_config if isinstance(scanner.scanner_config, dict) else {}
-            # A row whose `scanner_config` still holds the answer format but no experiment is one
-            # this migration moved off the native type; everything else came from the column.
-            if "prompt" in config and scanner.scanner_type == _SUMMARIZER:
-                restored = dict(config)
-                restored["experiment_id"] = scope["experiment_id"]
-                restored["variants"] = scope.get("variants")
-                if scope.get("balance") is False:
-                    restored["balance_variants"] = False
-                if scope.get("start_on_launch") is True:
-                    restored["start_on_launch"] = True
-                scanner.scanner_config = restored
-                scanner.scanner_type = _EXPERIMENT
-            else:
-                variants = scope.get("variants")
-                scanner.experiment_targeting = {
-                    "experiment_id": scope["experiment_id"],
-                    "variant": variants[0] if variants and len(variants) == 1 else None,
-                    "variants": list(variants) if variants and len(variants) > 1 else None,
-                }
-            scanner.scope = None
-            changed.append(scanner)
+        # Locked and written in one transaction, for the same reason as the forward step.
         with transaction.atomic():
+            rows = ReplayScanner.objects.order_by("pk").select_for_update(of=("self",))
+            if last_pk is not None:
+                rows = rows.filter(pk__gt=last_pk)
+            batch = list(
+                rows.only("id", "scanner_type", "scanner_config", "experiment_targeting", "scope")[:_BATCH_SIZE]
+            )
+            if not batch:
+                return
+            last_pk = batch[-1].pk
+            changed = []
+            for scanner in batch:
+                scope = scanner.scope
+                if not isinstance(scope, dict) or not scope.get("migrated_at"):
+                    continue
+                config = scanner.scanner_config if isinstance(scanner.scanner_config, dict) else {}
+                # A legacy column-targeted summarizer also carries a prompt, so the store the row came
+                # from is recorded on the scope rather than inferred from its config.
+                if scope.get("migrated_from") == _FROM_NATIVE:
+                    restored = dict(config)
+                    restored["experiment_id"] = scope["experiment_id"]
+                    restored["variants"] = scope.get("variants")
+                    if scope.get("balance") is False:
+                        restored["balance_variants"] = False
+                    if scope.get("start_on_launch") is True:
+                        restored["start_on_launch"] = True
+                    scanner.scanner_config = restored
+                    scanner.scanner_type = _EXPERIMENT
+                else:
+                    variants = scope.get("variants")
+                    scanner.experiment_targeting = {
+                        "experiment_id": scope["experiment_id"],
+                        "variant": variants[0] if variants and len(variants) == 1 else None,
+                        "variants": list(variants) if variants and len(variants) > 1 else None,
+                    }
+                scanner.scope = None
+                changed.append(scanner)
             ReplayScanner.objects.bulk_update(
                 changed, ["scanner_type", "scanner_config", "experiment_targeting", "scope"]
             )

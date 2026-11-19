@@ -137,6 +137,7 @@ class TestRestoreScannersFromScope(TestMigrations):
                 "variants": ["control", "test"],
                 "variants_source": "all_at_creation",
                 "migrated_at": stamp,
+                "migrated_from": "scanner_config",
             },
         )
         self.from_native_proportional = scanner(
@@ -149,13 +150,32 @@ class TestRestoreScannersFromScope(TestMigrations):
                 "variants": ["control"],
                 "balance": False,
                 "migrated_at": stamp,
+                "migrated_from": "scanner_config",
             },
         )
         self.from_legacy_single = scanner(
             name="n3",
             scanner_type="classifier",
             scanner_config={"prompt": "p", "tags": ["a"]},
-            scope={"kind": "experiment", "experiment_id": 21, "variants": ["test"], "migrated_at": stamp},
+            scope={
+                "kind": "experiment",
+                "experiment_id": 21,
+                "variants": ["test"],
+                "migrated_at": stamp,
+                "migrated_from": "experiment_targeting",
+            },
+        )
+        self.from_legacy_summarizer = scanner(
+            name="n5",
+            scanner_type="summarizer",
+            scanner_config={"prompt": "p"},
+            scope={
+                "kind": "experiment",
+                "experiment_id": 41,
+                "variants": ["test"],
+                "migrated_at": stamp,
+                "migrated_from": "experiment_targeting",
+            },
         )
         self.unmigrated = scanner(
             name="n4",
@@ -188,6 +208,15 @@ class TestRestoreScannersFromScope(TestMigrations):
         assert row.scanner_type == "classifier"
         assert row.experiment_targeting["experiment_id"] == 21
         assert row.experiment_targeting["variant"] == "test"
+        assert row.scope is None
+
+    def test_a_column_targeted_summarizer_does_not_become_an_experiment(self) -> None:
+        ReplayScanner = self.apps.get_model("replay_vision", "ReplayScanner")  # type: ignore[union-attr]
+        row = ReplayScanner.objects.get(id=self.from_legacy_summarizer)
+
+        assert row.scanner_type == "summarizer"
+        assert row.experiment_targeting["experiment_id"] == 41
+        assert "experiment_id" not in row.scanner_config
         assert row.scope is None
 
     def test_a_scope_this_migration_did_not_write_is_left_alone(self) -> None:
