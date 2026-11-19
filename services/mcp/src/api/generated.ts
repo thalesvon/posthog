@@ -29952,6 +29952,26 @@ export namespace Schemas {
     }
 
     /**
+     * * `starting` - Starting
+     * * `pending` - Pending
+     * * `connected` - Connected
+     * * `canceled` - Canceled
+     * * `expired` - Expired
+     * * `failed` - Failed
+     */
+    export type CodexDeviceLoginStatusEnum = typeof CodexDeviceLoginStatusEnum[keyof typeof CodexDeviceLoginStatusEnum];
+
+
+    export const CodexDeviceLoginStatusEnum = {
+      Starting: 'starting',
+      Pending: 'pending',
+      Connected: 'connected',
+      Canceled: 'canceled',
+      Expired: 'expired',
+      Failed: 'failed',
+    } as const;
+
+    /**
      * * `connected` - Connected
      * * `reauth_required` - Reauth Required
      * * `not_connected` - Not Connected
@@ -126724,6 +126744,30 @@ export namespace Schemas {
          * @nullable
          */
       connected_at?: string | null;
+    }
+
+    export interface UserCodexLogin {
+      /** The ID of this login attempt. */
+      login_id: string;
+      /** The state of the device login.
+       *
+       * * `starting` - Starting
+       * * `pending` - Pending
+       * * `connected` - Connected
+       * * `canceled` - Canceled
+       * * `expired` - Expired
+       * * `failed` - Failed */
+      status: CodexDeviceLoginStatusEnum;
+      /**
+         * The code to enter at https://auth.openai.com/codex/device.
+         * @nullable
+         */
+      user_code: string | null;
+    }
+
+    export interface UserCodexLoginRequest {
+      /** A new UUID for this login attempt. */
+      login_id: string;
     }
 
     /**
