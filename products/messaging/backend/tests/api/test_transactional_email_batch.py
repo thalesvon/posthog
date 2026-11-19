@@ -1,6 +1,7 @@
 import re
 import json
 from typing import Any
+from uuid import uuid4
 
 from posthog.test.base import APIBaseTest
 from unittest.mock import MagicMock, patch
@@ -38,8 +39,11 @@ from products.messaging.backend.presentation.views.message_templates import (
     TransactionalEmailTeamBurstThrottle,
     TransactionalEmailTeamSustainedThrottle,
 )
-from products.messaging.backend.services import transactional_email
-from products.messaging.backend.services.transactional_email import PIPELINE_REFUSALS, make_transactional
+from products.messaging.backend.services.transactional_email import (
+    PIPELINE_REFUSALS,
+    TRANSACTIONAL_EMAIL_KEY_LIMIT,
+    make_transactional,
+)
 from products.messaging.backend.tests.fake_cdp_api import _response
 from products.workflows.backend.facade.api import set_default_email_sender_if_unset
 from products.workflows.backend.facade.models import HogFlow
@@ -352,11 +356,23 @@ class TestTransactionalEmailBatch(APIBaseTest):
                 None,
             ),
             (
-                "key_of_a_refused_address_repeated_as_text",
+                "key_of_a_refused_address_repeated",
                 "template",
-                {"recipients": [{"to": "not an address", "idempotency_key": 7}, {**RECIPIENT, "idempotency_key": "7"}]},
+                {
+                    "recipients": [
+                        {"to": "not an address", "idempotency_key": "7"},
+                        {**RECIPIENT, "idempotency_key": "7"},
+                    ]
+                },
                 400,
                 "recipients__1__idempotency_key",
+            ),
+            (
+                "key_that_is_a_number",
+                "template",
+                {"recipients": [{"to": "not an address", "idempotency_key": 7}]},
+                400,
+                "recipients__0__idempotency_key",
             ),
             ("shared_data_with_a_lone_surrogate", "template", {"message_data": {"name": "\ud800"}}, 400, None),
             ("shared_attachments", "template", {"attachments": []}, 400, "attachments"),
@@ -519,7 +535,8 @@ class TestTransactionalEmailBatch(APIBaseTest):
             {"code": "delivery_unavailable", "detail": UNCONFIRMED_EMAIL, "status": 503, "retryable": True},
         ]
         assert all(
-            "again within 24 hours with the same `idempotency_key`" in result["error"]["detail"]
+            "again with the same `idempotency_key` within 24 hours of the first request that used it"
+            in result["error"]["detail"]
             for result in (unstarted, not_queued, unrecognized)
         )
         assert [
@@ -591,6 +608,10 @@ class TestTransactionalEmailBatch(APIBaseTest):
                         ACCEPTED, {"status": 202, "body": {"invocation_id": SECOND_MESSAGE_ID, "replayed": "no"}}
                     )
                 },
+            ),
+            (
+                "an_answer_with_a_server_error_and_a_definite_refusal",
+                {"return_value": _batch_answer(ACCEPTED, {"status": 500, "body": {"error": "recipient_suppressed"}})},
             ),
             (
                 "an_answer_with_a_success_status_and_a_refusal",
@@ -705,13 +726,13 @@ class TestTransactionalEmailBatch(APIBaseTest):
 
     @parameterized.expand(
         [
-            ("sensitive_template_marked_not_sensitive", True, False, 100, "sensitive_template"),
-            ("new_key_past_the_key_limit", False, False, 0, "too_many_keys"),
-            ("known_key_at_the_key_limit", False, True, 1, "invalid_recipient"),
+            ("sensitive_template_marked_not_sensitive", True, False, False, "sensitive_template"),
+            ("new_key_past_the_key_limit", False, False, True, "too_many_keys"),
+            ("known_key_at_the_key_limit", False, True, True, "invalid_recipient"),
         ]
     )
     def test_a_code_batch_with_no_recipient_it_can_address_answers_as_its_shared_email_does(
-        self, mock_post, _flag, _capture, _name, sensitive_template, key_known, key_limit, code
+        self, mock_post, _flag, _capture, _name, sensitive_template, key_known, at_the_key_limit, code
     ):
         MessageTemplate.objects.filter(id=self.template.id).update(
             key="welcome" if sensitive_template else None, sensitive=sensitive_template
@@ -720,10 +741,18 @@ class TestTransactionalEmailBatch(APIBaseTest):
             mock_post.return_value = MagicMock(status_code=202, json=lambda: {"invocation_id": "single"})
             assert self._single("code").status_code == status.HTTP_202_ACCEPTED
             mock_post.reset_mock()
+        if at_the_key_limit:
+            room = (
+                TRANSACTIONAL_EMAIL_KEY_LIMIT
+                - TransactionalEmailKey.objects.for_team(self.team.id, canonical=True).count()
+            )
+            TransactionalEmailKey.objects.for_team(self.team.id, canonical=True).bulk_create(
+                TransactionalEmailKey(team_id=self.team.id, key=f"seeded-{index}", hog_flow_id=uuid4())
+                for index in range(room)
+            )
         keys = TransactionalEmailKey.objects.for_team(self.team.id, canonical=True).count()
 
-        with patch.object(transactional_email, "TRANSACTIONAL_EMAIL_KEY_LIMIT", key_limit):
-            response = self._batch("code", [{"to": "not an address", "idempotency_key": "key-0"}], sensitive=False)
+        response = self._batch("code", [{"to": "not an address", "idempotency_key": "key-0"}], sensitive=False)
 
         answer = response.json()
         codes = [result["error"]["code"] for result in answer["results"]] if "results" in answer else [answer["code"]]

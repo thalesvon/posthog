@@ -47,17 +47,15 @@ FIELDS_THAT_FAIL_ONE_RECIPIENT = frozenset({"to", "distinct_id"})
 RECIPIENT_FIELDS_OUTSIDE_RECIPIENTS = {"to": "to", "distinct_id": "distinct_id", "identifiers": "distinct_id"}
 RECIPIENT_FIELDS = frozenset({"to", "distinct_id", "message_data", "idempotency_key"})
 RETRYABLE_CODES = frozenset({"idempotency_key_in_flight", "quota_limited", "delivery_unavailable", "not_attempted"})
-UNCONFIRMED_EMAIL = (
-    "The email pipeline did not confirm this email, so it may still go out. To retry, send it again within 24 hours "
-    "with the same `idempotency_key`, so it goes out once."
+RETRY_WITH_THE_SAME_KEY = (
+    "Send it again with the same `idempotency_key` within 24 hours of the first request that used it, so it goes out "
+    "once"
 )
-NOT_ATTEMPTED_EMAIL = (
-    "PostHog stopped before this request sent the email. Send it again within 24 hours with the same "
-    "`idempotency_key`, so it goes out once even if an earlier request queued it."
-)
+UNCONFIRMED_EMAIL = f"The email pipeline did not confirm this email, so it may still go out. {RETRY_WITH_THE_SAME_KEY}."
+NOT_ATTEMPTED_EMAIL = f"PostHog stopped before this request sent the email. {RETRY_WITH_THE_SAME_KEY} even if an earlier request queued it."
 NOT_QUEUED_EMAIL = (
-    "The email pipeline failed before this request queued the email. Send it again within 24 hours with the same "
-    "`idempotency_key`, so it goes out once even if an earlier request queued it."
+    f"The email pipeline failed before this request queued the email. {RETRY_WITH_THE_SAME_KEY} even if an earlier "
+    "request queued it."
 )
 
 
@@ -149,6 +147,13 @@ def _finite_int(text: str) -> int:
     return value
 
 
+class TextOnlyField(serializers.CharField):
+    def to_internal_value(self, data: Any) -> str:
+        if not isinstance(data, str):
+            self.fail("invalid")
+        return super().to_internal_value(data)
+
+
 class EmailBatchRecipientSerializer(serializers.Serializer):
     to = serializers.EmailField(
         validators=[validate_pipeline_address],
@@ -165,7 +170,7 @@ class EmailBatchRecipientSerializer(serializers.Serializer):
         help_text="Data for this recipient, merged over the batch's `message_data`: a top-level key set here "
         "replaces the same key there. Only a batch with `template_id` takes it.",
     )
-    idempotency_key = serializers.CharField(
+    idempotency_key = TextOnlyField(
         trim_whitespace=False,
         help_text="A unique key for this recipient's email, 1 to 255 visible ASCII characters, different for each "
         "recipient of the batch. Retrying with the same key and the same email within 24 hours sends nothing new and "
@@ -368,11 +373,13 @@ def batch_body_too_large() -> ExplainedRefusal:
 def unconfirmed_batch() -> ExplainedRefusal:
     return ExplainedRefusal(
         "The email pipeline did not confirm the batch, so some of its emails may still go out. To retry, send the "
-        "batch again within 24 hours with the same `idempotency_key` for each recipient, so each email goes out once.",
+        "batch again with the same `idempotency_key` for each recipient within 24 hours of the first request that "
+        "used it, so each email goes out once.",
         code="delivery_unavailable",
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         why="PostHog's email pipeline didn't answer for each recipient of the batch.",
-        fix="Send the batch again within 24 hours with the same `idempotency_key` for each recipient.",
+        fix="Send the batch again with the same `idempotency_key` for each recipient within 24 hours of its first "
+        "request.",
     )
 
 
