@@ -378,8 +378,8 @@ class BaseBatchExportInputs:
         data_interval_end: For manual runs, the end date of the batch. This should be set to `None` for regularly
             scheduled runs and for backfills.
         integration_id: The ID of the integration that contains the credentials for the destination.
-        use_new_events_schema: Read events_json even if the team and instance switches are off. Set from the
-            destination config, so users can move one export ahead of the rest. It can't turn the switches off.
+        use_new_events_schema: Read events_json[_recent] for this export. Set from the destination config, so a
+            user can move one export before the rest of its project.
     """
 
     batch_export_id: str

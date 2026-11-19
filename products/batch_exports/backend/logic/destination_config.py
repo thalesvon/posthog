@@ -68,13 +68,14 @@ def validate_destination_config(
         str_fields = ", ".join(f"'{extra_field}'" for extra_field in sorted(extra_fields))
         raise contracts.InvalidDestinationConfigError(f"Configuration has unknown field/s: {str_fields}")
 
-    # Users set this base field in the config, so it gets the same type check as the destination's own fields.
-    typed_base_fields = {
+    # TODO: Remove once every export reads events_json. Users set this base field in the config, so it gets the
+    # same type check as the destination's own fields.
+    new_events_schema_field = next(
         field for field in dataclasses.fields(BaseBatchExportInputs) if field.name == "use_new_events_schema"
-    }
+    )
 
     # Destination config fields without a dataclass default must be provided.
-    for destination_field in destination_fields | typed_base_fields:
+    for destination_field in destination_fields | {new_events_schema_field}:
         is_required = (
             destination_field.default == dataclasses.MISSING
             and destination_field.default_factory == dataclasses.MISSING

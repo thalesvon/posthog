@@ -90,7 +90,7 @@ def mock_clickhouse_client():
         yield mock_client
 
 
-@pytest.mark.parametrize("native_switch", ["off", "instance", "export"])
+@pytest.mark.parametrize("native_switch", ["off", "test-suite-setting", "export"])
 @pytest.mark.parametrize("interval", ["day", "every 5 minutes"], indirect=True)
 @pytest.mark.parametrize(
     "model",
@@ -159,7 +159,7 @@ async def test_insert_into_stage_activity_executes_the_expected_query_for_events
         use_new_events_schema=native_switch == "export",
     )
 
-    with override_settings(CLICKHOUSE_HOGQL_USE_NEW_EVENTS_SCHEMA=native_switch == "instance"):
+    with override_settings(CLICKHOUSE_HOGQL_USE_NEW_EVENTS_SCHEMA=native_switch == "test-suite-setting"):
         await activity_environment.run(insert_into_internal_stage_activity, insert_inputs)
     mock_clickhouse_client.expect_select_from_table(expected_table)
     mock_clickhouse_client.expect_properties_in_log_comment(

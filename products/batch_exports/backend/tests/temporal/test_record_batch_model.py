@@ -585,20 +585,20 @@ class TestHogQLQueryRecordBatchModel:
         }
 
     @pytest.mark.parametrize(
-        "instance_switch,export_opt_in,stored_modifiers,reads_native_table",
+        "test_suite_setting,export_opt_in,stored_modifiers,reads_native_table",
         [
             (True, False, {}, True),
             (False, True, {}, True),
             (False, True, {"useNewEventsSchema": False}, False),
             (False, False, {}, False),
         ],
-        ids=["instance-switch", "export-opt-in", "stored-modifier-wins", "off"],
+        ids=["test-suite-setting", "export-opt-in", "stored-modifier-wins", "off"],
     )
     async def test_request_settings_unescape_dotted_keys_on_the_native_table(
         self,
         ateam: "Team",
         auser: User,
-        instance_switch: bool,
+        test_suite_setting: bool,
         export_opt_in: bool,
         stored_modifiers: dict,
         reads_native_table: bool,
@@ -612,7 +612,7 @@ class TestHogQLQueryRecordBatchModel:
             new_events_schema_opt_in=export_opt_in,
         )
         assert isinstance(model, HogQLQueryRecordBatchModel)
-        with override_settings(CLICKHOUSE_HOGQL_USE_NEW_EVENTS_SCHEMA=instance_switch):
+        with override_settings(CLICKHOUSE_HOGQL_USE_NEW_EVENTS_SCHEMA=test_suite_setting):
             await model.as_query_with_context(None, None)
 
         request_settings = model.get_clickhouse_request_settings()
