@@ -655,6 +655,7 @@ class TestTransactionalEmailBatch(APIBaseTest):
         mock_post.return_value = MagicMock(status_code=202, json=lambda: sandbox_send)
         single = self._single("code", **sender)
         single_send = _forwarded(mock_post.call_args)["send"] if mock_post.called else None
+        mock_post.reset_mock()
         mock_post.return_value = _batch_answer(*[{"status": 202, "body": sandbox_send}] * 2)
 
         batch = self._batch("code", **sender)
@@ -662,7 +663,8 @@ class TestTransactionalEmailBatch(APIBaseTest):
         if single.status_code == status.HTTP_202_ACCEPTED:
             assert batch.status_code == status.HTTP_200_OK, batch.json()
             assert batch.json()["warnings"] == single.json()["warnings"]
-            assert _forwarded(mock_post.call_args)["send"] == single_send
+            (batch_call,) = mock_post.call_args_list
+            assert _forwarded(batch_call)["send"] == single_send
         else:
             assert (batch.status_code, batch.json()) == (single.status_code, single.json())
 

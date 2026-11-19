@@ -1,7 +1,7 @@
 import sys
 import json
 import math
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from functools import cache
 from typing import Any
 
@@ -41,6 +41,7 @@ BATCH_MAX_RECIPIENTS = 100
 BATCH_BODY_MAX_BYTES = 5 * 1024 * 1024
 BATCH_BODY_MAX_DEPTH = 100
 SHOWN_FIELD_NAME_MAX_LENGTH = 64
+_NO_CHILD = object()
 BATCH_REFUSED_FIELDS = ("scheduled_at", *CODE_SEND_EXTRA_FIELDS)
 FIELDS_THAT_FAIL_ONE_RECIPIENT = frozenset({"to", "distinct_id"})
 RECIPIENT_FIELDS_OUTSIDE_RECIPIENTS = {"to": "to", "distinct_id": "distinct_id", "identifiers": "distinct_id"}
@@ -51,11 +52,12 @@ UNCONFIRMED_EMAIL = (
     "with the same `idempotency_key`, so it goes out once."
 )
 NOT_ATTEMPTED_EMAIL = (
-    "PostHog stopped before it sent this email, so nothing was queued. Send it again with the same `idempotency_key`."
+    "PostHog stopped before this request sent the email. Send it again with the same `idempotency_key`, so it goes "
+    "out once even if an earlier request queued it."
 )
 NOT_QUEUED_EMAIL = (
-    "The email pipeline failed before it queued this email, so it won't go out. Send it again with the same "
-    "`idempotency_key`."
+    "The email pipeline failed before this request queued the email. Send it again with the same `idempotency_key`, "
+    "so it goes out once even if an earlier request queued it."
 )
 
 
@@ -106,15 +108,22 @@ def _too_deep() -> ParseError:
 
 
 def _nests_too_deeply(value: Any) -> bool:
-    pending = [(value, 1)]
-    while pending:
-        item, depth = pending.pop()
-        if not isinstance(item, dict | list):
-            continue
-        if depth > BATCH_BODY_MAX_DEPTH:
-            return True
-        pending.extend((child, depth + 1) for child in (item.values() if isinstance(item, dict) else item))
+    if not isinstance(value, dict | list):
+        return False
+    open_containers = [_children(value)]
+    while open_containers:
+        child = next(open_containers[-1], _NO_CHILD)
+        if child is _NO_CHILD:
+            open_containers.pop()
+        elif isinstance(child, dict | list):
+            if len(open_containers) >= BATCH_BODY_MAX_DEPTH:
+                return True
+            open_containers.append(_children(child))
     return False
+
+
+def _children(container: dict[str, Any] | list[Any]) -> Iterator[Any]:
+    return iter(container.values() if isinstance(container, dict) else container)
 
 
 def _members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
