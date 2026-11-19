@@ -157,20 +157,19 @@ export const readBatchBody = (
         const received = (chunk: Buffer): void => {
             chunks.push(chunk)
         }
-        // The abort timer can run after the last chunk even when the deadline has passed, so the read checks the clock.
+        // The abort timer can run after the last chunk even when the deadline has passed, so the read checks the clock
+        // before it parses and again once the parse is done.
         const ended = (): void => {
             if (deadlineError(deadline) !== undefined) {
                 return end({ read: 'deadline_exceeded' })
             }
-            let parsed: unknown
+            let read: BodyRead
             try {
-                parsed = parseJSON(Buffer.concat(chunks).toString('utf8'))
+                read = { read: 'parsed', body: parseJSON(Buffer.concat(chunks).toString('utf8')) }
             } catch {
-                return end({ read: 'invalid_request' })
+                read = { read: 'invalid_request' }
             }
-            end(
-                deadlineError(deadline) !== undefined ? { read: 'deadline_exceeded' } : { read: 'parsed', body: parsed }
-            )
+            end(deadlineError(deadline) !== undefined ? { read: 'deadline_exceeded' } : read)
         }
         const abandoned = (): void => end({ read: 'abandoned' })
         const expired = (): void => end({ read: 'deadline_exceeded' })

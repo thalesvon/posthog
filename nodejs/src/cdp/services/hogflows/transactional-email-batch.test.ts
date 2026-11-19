@@ -1,8 +1,12 @@
+import { PassThrough } from 'stream'
+
+import { deadlineAfter } from '../../utils/deadline'
 import {
     BatchCapacity,
     CodeSendBatchRequestSchema,
     TemplateBatchRequestSchema,
     batchDeadlineMs,
+    readBatchBody,
 } from './transactional-email-batch'
 
 describe('BatchCapacity', () => {
@@ -17,6 +21,27 @@ describe('BatchCapacity', () => {
 
         expect(capacity.admit()).not.toBeNull()
         expect(capacity.admit()).toBeNull()
+    })
+})
+
+describe('readBatchBody', () => {
+    afterEach(() => jest.restoreAllMocks())
+
+    // The clock passes the deadline while its abort timer has not run yet, which an event-loop stall causes in a pod.
+    it.each([
+        ['a body', '{"recipients": []}'],
+        ['a malformed body', '{"recipients": ['],
+    ])('answers %s that ends after its deadline passed as deadline_exceeded', async (_, text) => {
+        const deadline = deadlineAfter(60_000)
+        const body = new PassThrough()
+        const read = readBatchBody(body, { length: Buffer.byteLength(text), connection: null, deadline })
+        body.write(text.slice(0, 1))
+        const pastDeadline = performance.now() + 60_000
+        jest.spyOn(performance, 'now').mockReturnValue(pastDeadline)
+
+        body.end(text.slice(1))
+
+        expect([await read, deadline.aborted]).toEqual([{ read: 'deadline_exceeded' }, false])
     })
 })
 
