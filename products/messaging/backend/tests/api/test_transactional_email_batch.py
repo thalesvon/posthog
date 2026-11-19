@@ -164,6 +164,13 @@ class TestTransactionalEmailBatch(APIBaseTest):
             return {"template_key": "welcome", "subject": "Welcome", "html": "<p>Hi</p>"}
         return {"template_id": str(self.template.id), "message_data": {"link": "https://example.com/a", "n": 1}}
 
+    def _enforce_rate_limits(self) -> Any:
+        rate_limit.is_rate_limit_enabled.cache_clear()
+        rate_limit.get_team_allow_list.cache_clear()
+        self.addCleanup(rate_limit.is_rate_limit_enabled.cache_clear)
+        self.addCleanup(rate_limit.get_team_allow_list.cache_clear)
+        return override_instance_config("RATE_LIMIT_ENABLED", True)
+
     def _id(self, key: str) -> str:
         return str(keyed_message_id(self.team.id, key))
 
@@ -692,12 +699,10 @@ class TestTransactionalEmailBatch(APIBaseTest):
         assert "may still go out" not in response.json()["detail"]
         assert [call.kwargs["properties"]["outcome"] for call in capture.call_args_list] == ["not_admitted"]
 
-    @patch("posthog.rate_limit.team_is_allowed_to_bypass_throttle", return_value=False)
-    @patch("posthog.rate_limit.is_rate_limit_enabled", return_value=True)
-    def test_the_rate_limit_is_reserved_before_the_key_is_created(self, _enabled, _bypass, mock_post, _flag, _capture):
+    def test_the_rate_limit_is_reserved_before_the_key_is_created(self, mock_post, _flag, _capture):
         mock_post.return_value = self._queued_answer(5)
 
-        with patch.object(TransactionalEmailTeamBurstThrottle, "rate", "4/minute"):
+        with self._enforce_rate_limits(), patch.object(TransactionalEmailTeamBurstThrottle, "rate", "4/minute"):
             response = self._batch("code", self._recipients(5))
 
         assert response.status_code == status.HTTP_429_TOO_MANY_REQUESTS
@@ -715,11 +720,7 @@ class TestTransactionalEmailBatch(APIBaseTest):
     def test_a_batch_spends_one_send_per_recipient_and_a_refused_one_spends_one(
         self, mock_post, _flag, _capture, _name, throttle
     ):
-        with (
-            patch("posthog.rate_limit.team_is_allowed_to_bypass_throttle", return_value=False),
-            patch("posthog.rate_limit.is_rate_limit_enabled", return_value=True),
-            patch.object(throttle, "rate", "5/minute"),
-        ):
+        with self._enforce_rate_limits(), patch.object(throttle, "rate", "5/minute"):
             mock_post.return_value = self._queued_answer(3)
             spent = self._batch("template", self._recipients(3))
             refused = self._batch("template", self._recipients(3))
@@ -852,15 +853,8 @@ class TestTransactionalEmailBatch(APIBaseTest):
     def test_a_batch_while_its_flag_is_off_spends_no_send(self, mock_post, flag, _capture, _name, flag_off, form):
         flag.side_effect = lambda key, *_args, **_kwargs: key != flag_off
         mock_post.return_value = MagicMock(status_code=202, json=lambda: {"invocation_id": "single"})
-        rate_limit.is_rate_limit_enabled.cache_clear()
-        rate_limit.get_team_allow_list.cache_clear()
-        self.addCleanup(rate_limit.is_rate_limit_enabled.cache_clear)
-        self.addCleanup(rate_limit.get_team_allow_list.cache_clear)
 
-        with (
-            override_instance_config("RATE_LIMIT_ENABLED", True),
-            patch.object(TransactionalEmailTeamBurstThrottle, "rate", "1/minute"),
-        ):
+        with self._enforce_rate_limits(), patch.object(TransactionalEmailTeamBurstThrottle, "rate", "1/minute"):
             hidden = self._batch(form)
             single = self._single("template")
             hidden_past_the_budget = self._batch(form)
