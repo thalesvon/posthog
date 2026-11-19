@@ -30,6 +30,7 @@ from products.messaging.backend.presentation.views.email_batch import (
     BATCH_BODY_MAX_BYTES,
     EMAIL_BATCH_RESPONSES,
     SendEmailBatchSerializer,
+    StrictJSONParser,
     batch_body_too_large,
     email_batch_outcome,
     email_batch_response,
@@ -90,7 +91,10 @@ class KeyScopedMessagingSendViewSet(MessagingSendViewSet):
         ),
     )
     @action(
-        detail=False, methods=["POST"], parser_classes=[JSONParser], required_scopes=[TRANSACTIONAL_EMAIL_SEND_SCOPE]
+        detail=False,
+        methods=["POST"],
+        parser_classes=[StrictJSONParser],
+        required_scopes=[TRANSACTIONAL_EMAIL_SEND_SCOPE],
     )
     def email_batch(self, request: Any, *args: Any, **kwargs: Any) -> Response:
         batch_id = str(uuid4())

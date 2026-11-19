@@ -291,6 +291,14 @@ class TestTransactionalEmailBatch(APIBaseTest):
             ("shared_scheduled_at", "code", {"scheduled_at": "2030-01-01T00:00:00Z"}, 400, "scheduled_at"),
             ("shared_to", "template", {"to": "a@example.com"}, 400, "to"),
             ("shared_distinct_id", "code", {"distinct_id": "person-1"}, 400, "distinct_id"),
+            (
+                "shared_unknown_field",
+                "template",
+                {"mesage_data": {"link": "https://example.com/a"}},
+                400,
+                "mesage_data",
+            ),
+            ("shared_subject_that_is_not_json", "code", {"subject": float("nan")}, 400, None),
             ("shared_field_name_that_is_not_valid_unicode", "code", {"\ud800": 1}, 400, "\\ud800"),
             ("shared_legacy_identifiers", "template", {"identifiers": {"distinct_id": "person-1"}}, 400, "identifiers"),
             (

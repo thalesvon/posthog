@@ -1,8 +1,10 @@
 from collections.abc import Mapping
+from functools import cache
 from typing import Any
 
 from drf_spectacular.utils import OpenApiResponse
 from rest_framework import serializers, status
+from rest_framework.parsers import JSONParser
 
 from posthog.api.fields import LengthFirstListField
 from posthog.api.mixins import ResponseDeclaration
@@ -44,6 +46,10 @@ UNCONFIRMED_EMAIL = (
 NOT_ATTEMPTED_EMAIL = (
     "PostHog stopped before it sent this email, so nothing was queued. Send it again with the same `idempotency_key`."
 )
+
+
+class StrictJSONParser(JSONParser):
+    strict = True
 
 
 class EmailBatchRecipientSerializer(serializers.Serializer):
@@ -202,8 +208,6 @@ def refused_batch_field(data: Any, *, takes_template_key: bool) -> ExplainedRefu
         return None
     if field := next((field for field in BATCH_REFUSED_FIELDS if field in data), None):
         return _field_refusal(field)
-    if (unreadable := next((field for field in data if _escaped(field) != field), None)) is not None:
-        return _unreadable_field_refusal(_escaped(unreadable))
     if field := next((field for field in RECIPIENT_FIELDS_OUTSIDE_RECIPIENTS if field in data), None):
         return ExplainedRefusal(
             f"A batch send names each recipient in `recipients`, so it doesn't take `{field}` outside them.",
@@ -212,6 +216,8 @@ def refused_batch_field(data: Any, *, takes_template_key: bool) -> ExplainedRefu
             why="Each recipient of a batch gets its own email, addressed by its own entry in `recipients`.",
             fix=f"Move `{RECIPIENT_FIELDS_OUTSIDE_RECIPIENTS[field]}` into each entry of `recipients`.",
         )
+    if (unknown := next((field for field in data if field not in _batch_fields()), None)) is not None:
+        return _unknown_field_refusal(_escaped(unknown))
     recipients = data.get("recipients")
     if not isinstance(recipients, list) or len(recipients) > BATCH_MAX_RECIPIENTS:
         return None
@@ -310,11 +316,16 @@ def _escaped(field: Any) -> str:
     return str(field).encode("utf-8", "backslashreplace").decode()
 
 
-def _unreadable_field_refusal(field: str) -> ExplainedRefusal:
+@cache
+def _batch_fields() -> frozenset[str]:
+    return frozenset(SendEmailBatchSerializer().fields.keys())
+
+
+def _unknown_field_refusal(field: str) -> ExplainedRefusal:
     return ExplainedRefusal(
         f"A batch send doesn't take `{field}`, so PostHog didn't send the batch.",
         code="field_not_accepted",
         attr=field,
-        why="A field name must be valid Unicode text.",
-        fix=f"Remove `{field}` from the batch.",
+        why="A batch takes the fields of the shared email and `recipients`, and a misspelled field would be dropped.",
+        fix=f"Remove `{field}`, or fix its spelling.",
     )
