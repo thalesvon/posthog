@@ -670,14 +670,7 @@ def send_code_email(
 def check_email_batch(
     recipients: Sequence[BatchRecipient], *, message_data: dict[str, Any] | None = None, email: CodeEmail | None = None
 ) -> tuple[BatchRecipient, ...]:
-    try:
-        within_limit = _within_batch_shared_limit(message_data if email is None else email)
-    except UnicodeEncodeError:
-        raise InvalidRequest(
-            "The content or `message_data` that a batch sends to every recipient holds text that isn't valid "
-            "Unicode, such as a lone surrogate. Fix the text, then send the batch again."
-        ) from None
-    if not within_limit:
+    if not _within_batch_shared_limit(message_data if email is None else email):
         raise ContentTooLarge(
             f"The content or `message_data` that a batch sends to every recipient can be at most "
             f"{BATCH_SHARED_MAX_BYTES // 1024} KiB. Send larger emails one at a time."
@@ -739,16 +732,6 @@ def _checked_recipient(recipient: BatchRecipient) -> BatchRecipient:
         _check_send_request(recipient.to, recipient.idempotency_key)
     except InvalidRecipient as e:
         return dataclasses.replace(recipient, refusal=e)
-    try:
-        _encoded_size(_batch_recipient_payload(recipient))
-    except UnicodeEncodeError:
-        return dataclasses.replace(
-            recipient,
-            refusal=InvalidRecipient(
-                "This recipient's `distinct_id` or `message_data` holds text that isn't valid Unicode, such as a "
-                "lone surrogate. Fix the text, then send it again."
-            ),
-        )
     return recipient
 
 

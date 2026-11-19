@@ -78,7 +78,7 @@ class KeyScopedMessagingSendViewSet(MessagingSendViewSet):
         return refusal
 
     @extend_schema(
-        request=SendEmailBatchSerializer,
+        request={"application/json": SendEmailBatchSerializer},
         responses=EMAIL_BATCH_RESPONSES,
         summary="Send a transactional email to a batch of recipients",
         description=(

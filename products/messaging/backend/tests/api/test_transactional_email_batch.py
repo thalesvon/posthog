@@ -232,13 +232,12 @@ class TestTransactionalEmailBatch(APIBaseTest):
             {"to": "{{person.email}}@example.com", "idempotency_key": "key-0"},
             {"to": "user1@example.com", "idempotency_key": "key-1"},
             {"to": "not an address", "idempotency_key": "key-2"},
-            {"to": "user3@example.com", "idempotency_key": "key-3", "message_data": {"name": "\ud800"}},
         ]
 
         response = self._batch("template", recipients)
 
         assert response.status_code == status.HTTP_200_OK, response.json()
-        refused, queued, malformed, unencodable = response.json()["results"]
+        refused, queued, malformed = response.json()["results"]
         assert (refused["error"]["code"], refused["error"]["status"], refused["error"]["retryable"]) == (
             "invalid_recipient",
             400,
@@ -247,7 +246,6 @@ class TestTransactionalEmailBatch(APIBaseTest):
         assert "{ or }" in refused["error"]["detail"]
         assert queued == {"message_id": MESSAGE_ID, "status": "queued", "replayed": False}
         assert malformed["error"]["code"] == "invalid_recipient"
-        assert unencodable["error"]["code"] == "invalid_recipient"
         assert [recipient["to"] for recipient in _forwarded(mock_post.call_args)["recipients"]] == ["user1@example.com"]
 
     @parameterized.expand(
@@ -298,7 +296,16 @@ class TestTransactionalEmailBatch(APIBaseTest):
                 400,
                 "mesage_data",
             ),
-            ("shared_field_name_that_is_not_valid_unicode", "code", {"\ud800": 1}, 400, "\\ud800"),
+            ("shared_field_name_that_is_not_valid_unicode", "code", {"\ud800": 1}, 400, None),
+            ("shared_html_with_a_lone_surrogate", "code", {"html": "<p>\ud800</p>"}, 400, None),
+            ("sender_name_with_a_lone_surrogate", "code", {"from": "\ud800 <hello@example.com>"}, 400, None),
+            (
+                "recipient_data_with_a_lone_surrogate",
+                "template",
+                {"recipients": [{**RECIPIENT, "message_data": {"name": "\ud800"}}]},
+                400,
+                None,
+            ),
             ("shared_legacy_identifiers", "template", {"identifiers": {"distinct_id": "person-1"}}, 400, "identifiers"),
             (
                 "unverified_sender_and_no_recipient_it_can_address",
@@ -329,7 +336,7 @@ class TestTransactionalEmailBatch(APIBaseTest):
                 "template",
                 {"recipients": [{**RECIPIENT, "\ud800": 1}]},
                 400,
-                "recipients__0__\\ud800",
+                None,
             ),
             (
                 "key_of_a_refused_address_repeated_as_text",
@@ -425,6 +432,7 @@ class TestTransactionalEmailBatch(APIBaseTest):
         [
             ("constant_that_is_not_json", "NaN", 400, "parse_error"),
             ("number_beyond_a_float", "1e400", 400, "parse_error"),
+            ("integer_beyond_a_float", "1" + "0" * 400, 400, "parse_error"),
             ("cut_off_over_the_batch_cap", '"' + "x" * 6 * 1024 * 1024, 413, "content_too_large"),
         ]
     )
@@ -437,6 +445,14 @@ class TestTransactionalEmailBatch(APIBaseTest):
 
         assert (response.status_code, response.json()["code"]) == (expected_status, expected_code)
         mock_post.assert_not_called()
+
+    def test_reads_a_json_batch_whatever_charset_it_names(self, mock_post, _flag, _capture):
+        mock_post.return_value = _batch_answer(ACCEPTED)
+        body = json.dumps({**self._email("template"), "recipients": self._recipients(1)})
+
+        response = self.psak.post(BATCH_URL, body, content_type="application/json; charset=base64_codec")
+
+        assert response.status_code == status.HTTP_200_OK, response.json()
 
     def test_a_duplicate_key_names_both_recipients(self, mock_post, _flag, _capture):
         recipients = [{**RECIPIENT, "to": "a@example.com"}, {**RECIPIENT, "to": "b@example.com"}]

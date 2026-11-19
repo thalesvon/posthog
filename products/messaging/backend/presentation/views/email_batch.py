@@ -1,10 +1,9 @@
+import sys
 import json
 import math
 from collections.abc import Mapping
 from functools import cache
 from typing import Any
-
-from django.conf import settings
 
 from drf_spectacular.utils import OpenApiResponse
 from rest_framework import serializers, status
@@ -67,11 +66,22 @@ class BatchJSONParser(BaseParser):
             return UnreadBody(UnsupportedMediaType(media_type or ""))
         context = parser_context or {}
         body = context["request"].body if "request" in context else stream.read()
+        if len(body) > BATCH_BODY_MAX_BYTES:
+            return UnreadBody(batch_body_too_large())
         try:
-            text = body.decode(context.get("encoding", settings.DEFAULT_CHARSET))
-            return json.loads(text, parse_constant=_refused_constant, parse_float=_finite)
+            value = json.loads(body, parse_constant=_refused_constant, parse_float=_finite, parse_int=_finite_int)
         except ValueError as e:
             return UnreadBody(ParseError(f"JSON parse error - {e}"))
+        try:
+            json.dumps(value, ensure_ascii=False).encode()
+        except UnicodeEncodeError:
+            return UnreadBody(
+                ParseError(
+                    "The body holds text that isn't valid Unicode, such as a lone surrogate. Fix the text, then send "
+                    "the batch again."
+                )
+            )
+        return value
 
 
 def _refused_constant(text: str) -> float:
@@ -80,6 +90,12 @@ def _refused_constant(text: str) -> float:
 
 def _finite(text: str) -> float:
     if not math.isfinite(value := float(text)):
+        raise ValueError(f"{text} is out of range")
+    return value
+
+
+def _finite_int(text: str) -> int:
+    if abs(value := int(text)) > sys.float_info.max:
         raise ValueError(f"{text} is out of range")
     return value
 
@@ -249,7 +265,7 @@ def refused_batch_field(data: Any, *, takes_template_key: bool) -> ExplainedRefu
             fix=f"Move `{RECIPIENT_FIELDS_OUTSIDE_RECIPIENTS[field]}` into each entry of `recipients`.",
         )
     if (unknown := next((field for field in data if field not in _batch_fields()), None)) is not None:
-        return _unknown_field_refusal(_escaped(unknown))
+        return _unknown_field_refusal(unknown)
     recipients = data.get("recipients")
     if not isinstance(recipients, list) or len(recipients) > BATCH_MAX_RECIPIENTS:
         return None
@@ -258,8 +274,7 @@ def refused_batch_field(data: Any, *, takes_template_key: bool) -> ExplainedRefu
             continue
         if field := next((field for field in BATCH_REFUSED_FIELDS if field in recipient), None):
             return _field_refusal(f"recipients__{index}__{field}")
-        if (unknown := next((field for field in recipient if field not in RECIPIENT_FIELDS), None)) is not None:
-            field = _escaped(unknown)
+        if (field := next((name for name in recipient if name not in RECIPIENT_FIELDS), None)) is not None:
             return ExplainedRefusal(
                 f"A batch recipient doesn't take `{field}`, so PostHog didn't send the batch.",
                 code="field_not_accepted",
@@ -342,10 +357,6 @@ def _result(result: QueuedEmail | TransactionalEmailError | DeliveryUnavailable)
         code, detail = result.code, str(result)
         status_code = TransactionalEmailRejected.STATUS_BY_CODE.get(code, status.HTTP_400_BAD_REQUEST)
     return {"error": {"code": code, "detail": detail, "status": status_code, "retryable": code in RETRYABLE_CODES}}
-
-
-def _escaped(field: Any) -> str:
-    return str(field).encode("utf-8", "backslashreplace").decode()
 
 
 @cache
