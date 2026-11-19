@@ -290,6 +290,13 @@ class TestTransactionalEmailBatch(APIBaseTest):
             ("shared_data_over_256_kib", "template", {"message_data": {"blob": "x" * 256 * 1024}}, 400, None),
             ("shared_content_over_256_kib", "code", {"html": "<p>" + "x" * 256 * 1024 + "</p>"}, 400, None),
             ("body_over_5_mib", "template", {"message_data": {"blob": "x" * 5 * 1024 * 1024}}, 413, None),
+            (
+                "body_over_5_mib_with_a_refused_field",
+                "template",
+                {"scheduled_at": "2030-01-01T00:00:00Z", "message_data": {"blob": "x" * 5 * 1024 * 1024}},
+                413,
+                None,
+            ),
         ]
     )
     def test_refuses_a_batch_it_cannot_send_as_a_whole(
@@ -316,11 +323,11 @@ class TestTransactionalEmailBatch(APIBaseTest):
         assert response.status_code == status.HTTP_200_OK, response.json()
         assert [result["status"] for result in response.json()["results"]] == ["queued"] * count
 
-    def test_publishes_no_field_a_batch_refuses(self, _mock_post, _flag, _capture):
-        published = set(SendEmailBatchSerializer().fields)
+    def test_the_batch_request_schema_takes_no_field_a_batch_refuses(self, _mock_post, _flag, _capture):
+        request_fields = set(SendEmailBatchSerializer().fields)
 
-        assert published.isdisjoint(BATCH_REFUSED_FIELDS)
-        assert "recipients" in published
+        assert request_fields.isdisjoint(BATCH_REFUSED_FIELDS)
+        assert "recipients" in request_fields
 
     def _form_encoded_batch(self) -> Any:
         return self.psak.post(
@@ -461,10 +468,18 @@ class TestTransactionalEmailBatch(APIBaseTest):
         assert last_single.status_code == status.HTTP_202_ACCEPTED, last_single.json()
         assert over_budget.status_code == status.HTTP_429_TOO_MANY_REQUESTS
 
-    def test_a_sandbox_batch_that_names_a_sender_answers_as_a_single_send_does(self, mock_post, _flag, _capture):
+    @parameterized.expand(
+        [
+            ("from", {"from": "Example <hello@example.org>"}),
+            ("reply_to", {"reply_to": ["help@example.org"]}),
+            ("both", {"from": "Example <hello@example.org>", "reply_to": ["help@example.org"]}),
+        ]
+    )
+    def test_a_sandbox_batch_that_names_a_sender_answers_as_a_single_send_does(
+        self, mock_post, _flag, _capture, _name, sender
+    ):
         Integration.objects.filter(id=self.sender.id).delete()
         TeamWorkflowsConfig.objects.filter(team_id=self.team.id).update(default_email_integration_id=None)
-        sender = {"from": "Example <hello@example.org>", "reply_to": ["help@example.org"]}
         sandbox_send = {"invocation_id": "sandbox-1", "sender_kind": "email_sandbox"}
         mock_post.return_value = MagicMock(status_code=202, json=lambda: sandbox_send)
         single = self._single("code", **sender)

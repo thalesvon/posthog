@@ -78,14 +78,12 @@ class KeyScopedMessagingSendViewSet(MessagingSendViewSet):
             require_email_batch_sends(self.team)
         if request.content_type.split(";")[0].strip().lower() != JSONParser.media_type:
             raise UnsupportedMediaType(request.content_type)
-        body_bytes = len(request.body)
-        with transactional_email_stage("feature_flag"):
-            takes_template_key = isinstance(request.data, Mapping) and "template_key" in request.data
-            (require_email_from_code if takes_template_key else require_transactional_email_api)(self.team)
+        if len(request.body) > BATCH_BODY_MAX_BYTES:
+            raise batch_body_too_large()
+        takes_template_key = isinstance(request.data, Mapping) and "template_key" in request.data
+        (require_email_from_code if takes_template_key else require_transactional_email_api)(self.team)
         if refusal := refused_batch_field(request.data, takes_template_key=takes_template_key):
             raise refusal
-        if body_bytes > BATCH_BODY_MAX_BYTES:
-            raise batch_body_too_large()
         serializer = SendEmailBatchSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         request.validated_data = data = serializer.validated_data
