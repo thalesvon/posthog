@@ -19,6 +19,8 @@ from aioresponses import aioresponses
 from structlog.testing import capture_logs
 from temporalio.testing import ActivityEnvironment
 
+from posthog.clickhouse.client.connection import events_cluster_http_url
+from posthog.clickhouse.workload import Workload
 from posthog.models import Team, User
 from posthog.models.event.new_events_schema import EVENTS_TABLE_ROLLOUT_FLAG
 from posthog.models.utils import uuid7
@@ -172,16 +174,14 @@ async def test_insert_into_stage_activity_executes_the_expected_query_for_events
 
 
 @pytest.mark.parametrize(
-    "use_native_schema,rollout_flag_on,expected_table",
-    [(False, False, "events"), (True, False, "events_json"), (False, True, "events")],
-    ids=["legacy", "native", "rollout-flag-on"],
+    "native_switch,expected_table",
+    [("off", "events"), ("test-suite-setting", "events_json"), ("export", "events_json"), ("rollout-flag", "events")],
 )
 async def test_insert_into_stage_activity_reads_native_events_for_workflows(
     mock_clickhouse_client,
     activity_environment,
     ateam,
-    use_native_schema: bool,
-    rollout_flag_on: bool,
+    native_switch: str,
     expected_table: str,
 ):
     insert_inputs = BatchExportInsertIntoInternalStageInputs(
@@ -196,11 +196,26 @@ async def test_insert_into_stage_activity_reads_native_events_for_workflows(
         backfill_details=None,
         is_workflows=True,
         destination_default_fields=None,
+        use_new_events_schema=native_switch == "export",
     )
+    events_cluster_url = "http://events-offline.example.com:8123/"
+    connected_events_cluster_urls: list[str | None] = []
+
+    async def connect(*args, **kwargs):
+        connected_events_cluster_urls.append(
+            await database_sync_to_async(events_cluster_http_url)(Workload.OFFLINE, ateam.pk)
+        )
+        return mock_clickhouse_client.mock_client
+
+    mock_clickhouse_client.mock_client_cm.__aenter__.side_effect = connect
 
     with (
-        override_settings(CLICKHOUSE_HOGQL_USE_NEW_EVENTS_SCHEMA=use_native_schema),
-        patch("posthog.models.event.new_events_schema.is_cloud", return_value=rollout_flag_on),
+        override_settings(
+            CLICKHOUSE_HOGQL_USE_NEW_EVENTS_SCHEMA=native_switch == "test-suite-setting",
+            CLICKHOUSE_EVENTS_OFFLINE_HOST="events-offline.example.com",
+            CLICKHOUSE_EVENTS_OFFLINE_HTTP_URL=events_cluster_url,
+        ),
+        patch("posthog.models.event.new_events_schema.is_cloud", return_value=native_switch == "rollout-flag"),
         patch(
             "posthog.models.event.new_events_schema.posthoganalytics.feature_enabled",
             side_effect=lambda flag, *args, **kwargs: flag == EVENTS_TABLE_ROLLOUT_FLAG,
@@ -211,6 +226,7 @@ async def test_insert_into_stage_activity_reads_native_events_for_workflows(
     mock_clickhouse_client.expect_select_from_table(expected_table)
     if expected_table == "events":
         assert "events_json" not in mock_clickhouse_client.calls[0].query
+    assert connected_events_cluster_urls == [events_cluster_url if expected_table == "events_json" else None]
 
 
 @pytest.mark.parametrize("interval", ["day"], indirect=True)

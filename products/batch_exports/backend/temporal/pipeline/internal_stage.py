@@ -22,7 +22,10 @@ from posthog.clickhouse.workload import Workload
 from posthog.credentials import AWSKeyPair
 from posthog.dataclasses import frozen
 
-from products.batch_exports.backend.events_table import batch_exports_read_new_events_table
+from products.batch_exports.backend.events_table import (
+    batch_exports_read_new_events_table,
+    route_to_events_table_cluster,
+)
 from products.batch_exports.backend.temporal.utils import make_retryable_with_exponential_backoff
 
 if typing.TYPE_CHECKING:
@@ -457,10 +460,11 @@ async def _stage_query_results(
     if record_batch_model is not None:
         query_or_model: str | RecordBatchModel = record_batch_model
         query_parameters: dict[str, typing.Any] = {}
+        reads_new_events_table = False
     else:
         if full_range[1] is None or inputs.data_interval_end is None:
             raise MissingRequiredInputsError("Fixed batch export models require data_interval_end")
-        query_or_model, query_parameters = await _get_query(
+        query_or_model, query_parameters, reads_new_events_table = await _get_query(
             model_name=model_name,
             backfill_details=inputs.backfill_details,
             team_id=inputs.team_id,
@@ -493,6 +497,7 @@ async def _stage_query_results(
             s3_staging_folder_url=s3_staging_folder.url,
             num_partitions=num_partitions,
             run_id=run_id,
+            reads_new_events_table=reads_new_events_table,
         )
     except ClickHouseUnknownTableError as e:
         if isinstance(record_batch_model, HogQLQueryRecordBatchModel):
@@ -588,7 +593,8 @@ async def _get_query(
     is_workflows: bool = False,
     new_events_schema_opt_in: bool = False,
     **parameters,
-):
+) -> tuple[str, dict[str, typing.Any], bool]:
+    """The query, its parameters, and whether it reads events_json."""
     logger = LOGGER.bind(model_name=model_name)
 
     if fields is None:
@@ -610,6 +616,7 @@ async def _get_query(
         num_partitions=num_partitions,
     )
 
+    native_source = False
     if model_name == "persons":
         if is_backfill and full_range[0] is None:
             query_template = EXPORT_TO_S3_FROM_PERSONS_BACKFILL
@@ -717,7 +724,7 @@ async def _get_query(
     parameters["log_comment"] = tags.to_json()
 
     parameters = {**parameters, **extra_query_parameters}
-    return query, parameters
+    return query, parameters, native_source
 
 
 def get_base_s3_staging_folder(
@@ -780,11 +787,13 @@ async def _write_batch_export_record_batches_to_internal_stage(
     s3_staging_folder_url: str,
     num_partitions: int | None = None,
     run_id: str | None = None,
+    reads_new_events_table: bool = False,
 ) -> int | None:
     """Write record batches to our own internal S3 staging area.
 
     Returns the number of rows written to the stage, or None if the count couldn't be
-    determined.
+    determined. `reads_new_events_table` says whether a query string reads events_json. A model's
+    HogQL context says it for the model.
     """
     logger = LOGGER.bind()
 
@@ -835,6 +844,7 @@ async def _write_batch_export_record_batches_to_internal_stage(
         query_parameters = context.values
         query_settings = query_or_model.get_clickhouse_request_settings()
         workload = context.workload or Workload.OFFLINE
+        reads_new_events_table = await database_sync_to_async(context.uses_new_events_schema)()
     else:
         query = query_or_model
         query_settings = {}
@@ -847,20 +857,23 @@ async def _write_batch_export_record_batches_to_internal_stage(
     if workload in (Workload.DEFAULT, Workload.OFFLINE) and is_5_min_batch_export(full_range=full_range):
         clickhouse_url = settings.CLICKHOUSE_OFFLINE_5MIN_CLUSTER_HOST
 
-    async with get_client(
-        team_id=team_id,
-        clickhouse_url=clickhouse_url,
-        workload=workload,
-        # TODO: Strict limits are available in ClickHouse 26.4
-        # We should uncomment all of these here to let max_insert_block_size_bytes dictate the size
-        # once clickhouse is upgraded.
-        # use_strict_insert_block_limits=1,
-        # max_insert_block_size_rows=0,
-        # max_insert_block_size_bytes=settings.BATCH_EXPORTS_CLICKHOUSE_MAX_INSERT_BLOCK_SIZE_BYTES,
-        min_insert_block_size_bytes=settings.BATCH_EXPORTS_CLICKHOUSE_MAX_INSERT_BLOCK_SIZE_BYTES,
-        # Disable all of these so only the bytes limits counts.
-        min_insert_block_size_rows=0,
-    ) as client:
+    async with (
+        route_to_events_table_cluster(reads_new_events_table),
+        get_client(
+            team_id=team_id,
+            clickhouse_url=clickhouse_url,
+            workload=workload,
+            # TODO: Strict limits are available in ClickHouse 26.4
+            # We should uncomment all of these here to let max_insert_block_size_bytes dictate the size
+            # once clickhouse is upgraded.
+            # use_strict_insert_block_limits=1,
+            # max_insert_block_size_rows=0,
+            # max_insert_block_size_bytes=settings.BATCH_EXPORTS_CLICKHOUSE_MAX_INSERT_BLOCK_SIZE_BYTES,
+            min_insert_block_size_bytes=settings.BATCH_EXPORTS_CLICKHOUSE_MAX_INSERT_BLOCK_SIZE_BYTES,
+            # Disable all of these so only the bytes limits counts.
+            min_insert_block_size_rows=0,
+        ) as client,
+    ):
         if not await client.is_alive():
             raise ConnectionError("Cannot establish connection to ClickHouse")
 
