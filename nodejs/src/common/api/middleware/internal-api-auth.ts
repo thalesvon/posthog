@@ -20,13 +20,6 @@ export const INTERNAL_SERVICE_CALL_HEADER_NAME = 'X-Internal-Api-Secret'
 // Paths that don't require authentication (public endpoints and health checks)
 const PUBLIC_PATH_PREFIXES = ['/public/', '/_health', '/_ready', '/_metrics', '/metrics']
 
-// Routes that authenticate with their own scoped JWT instead of the shared internal secret, so
-// their callers never need INTERNAL_API_SECRET (the goal of retiring it). Each entry must be a
-// full-path pattern anchored to exactly one route whose handler enforces its own auth — never
-// add a pattern here without one. Suffix matching is not safe for this list: some routes take a
-// caller-controlled trailing segment (e.g. batch_invocations' :parent_run_id), so a bare suffix
-// like '/cancel' would let a crafted id inherit the exemption and reach a handler that never
-// checks a token.
 // The routes of CdpApi.postTransactionalEmailBatch. Express routing is not strict, so each route also takes its path
 // with a trailing slash, and these match it too. The scoped-auth exemption and the router's body-parser skip both use
 // this list, so the two checks stay aligned.
@@ -35,6 +28,13 @@ export const TRANSACTIONAL_EMAIL_BATCH_PATH_PATTERNS = [
     /^\/api\/projects\/[^/]+\/hog_flows\/[^/]+\/transactional_email\/send\/batch\/?$/,
 ]
 
+// Routes that authenticate with their own scoped JWT instead of the shared internal secret, so
+// their callers never need INTERNAL_API_SECRET (the goal of retiring it). Each entry must be a
+// full-path pattern anchored to exactly one route whose handler enforces its own auth — never
+// add a pattern here without one. Suffix matching is not safe for this list: some routes take a
+// caller-controlled trailing segment (e.g. batch_invocations' :parent_run_id), so a bare suffix
+// like '/cancel' would let a crafted id inherit the exemption and reach a handler that never
+// checks a token.
 const SCOPED_AUTH_PATH_PATTERNS = [
     // CdpApi.postHogFlowRescheduleParked, verified against WORKFLOWS_RESCHEDULE_JWT_SECRET.
     /^\/api\/projects\/[^/]+\/hog_flows\/[^/]+\/reschedule_parked$/,

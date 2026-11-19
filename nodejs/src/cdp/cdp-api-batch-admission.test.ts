@@ -22,7 +22,11 @@ describe('a transactional email batch on a pod that requires the internal secret
     let server: Server
 
     beforeAll(async () => {
-        hub = await createHub({ SITE_URL: 'http://localhost:8000', CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_REQUESTS: 0 })
+        hub = await createHub({
+            SITE_URL: 'http://localhost:8000',
+            CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_REQUESTS: 0,
+            CDP_INTAKE_KAFKA_ASYNC_TEAMS: '1',
+        })
         api = new CdpApi(
             hub,
             { ...createCdpConsumerDeps(hub), idempotencyValkey: createIdempotencyValkeyPool(hub) },

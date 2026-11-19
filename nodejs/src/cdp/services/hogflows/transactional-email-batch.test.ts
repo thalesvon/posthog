@@ -14,7 +14,6 @@ describe('BatchCapacity', () => {
         expect(capacity.admit()).toBeNull()
 
         release!()
-        release!()
 
         expect(capacity.admit()).not.toBeNull()
         expect(capacity.admit()).toBeNull()

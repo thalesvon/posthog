@@ -61,11 +61,9 @@ export const kafkaRecordsOn = (topic: string): (() => Buffer[]) => {
             .map(([, , value]) => value as Buffer)
 }
 
-// `release()` also makes the broker ack at once again. `received()` returns the values the broker got on `topic`
-// since the hold started, released or not.
-export const holdKafkaAcks = (topic: string): { release: () => void; received: () => Buffer[] } => {
+// `release()` also makes the broker ack at once again.
+export const holdKafkaAcks = (topic: string): { release: () => void } => {
     const deliver = mockBroker.produce.getMockImplementation()!
-    const received = kafkaRecordsOn(topic)
     let ack: () => void = () => {}
     const acked = new Promise<void>((resolve) => (ack = resolve))
     mockBroker.produce.mockImplementation((...args: unknown[]) =>
@@ -76,6 +74,5 @@ export const holdKafkaAcks = (topic: string): { release: () => void; received: (
             ack()
             mockBroker.produce.mockImplementation(deliver)
         },
-        received,
     }
 }

@@ -89,24 +89,7 @@ export class RunIntake {
 
     // Async mode: the claim is left to the consumer. Never throws; a lookup that fails or runs late reads as absent.
     async recallWithin(claim: Claim, kind: RunKind, budgetMs: number = ASYNC_RECALL_BUDGET_MS): Promise<Recalled> {
-        let timer: NodeJS.Timeout | undefined
-        const late = new Promise<'late'>((resolve) => (timer = setTimeout(() => resolve('late'), budgetMs)))
-        try {
-            const recalled = await Promise.race([this.recall(claim), late])
-            if (recalled !== 'late') {
-                return recalled
-            }
-        } catch (error) {
-            logger.warn('[CdpIntake] Claim lookup failed, producing the run without it', {
-                kind,
-                run_id: claim.runId,
-                error: error instanceof Error ? error.message : String(error),
-            })
-        } finally {
-            clearTimeout(timer)
-        }
-        recallFailSoftCounter.labels({ kind }).inc()
-        return { status: 'absent' }
+        return (await this.recallAllWithin([claim], kind, budgetMs))[0]
     }
 
     async recallAllWithin(

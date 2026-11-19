@@ -3036,7 +3036,7 @@ describe('CDP API', () => {
             })
 
             it('produces a keyed send when its claim lookup does not answer in time', async () => {
-                jest.spyOn(api['hogflowQueue'], 'findIdempotencyKey').mockReturnValue(new Promise(() => {}))
+                jest.spyOn(api['hogflowQueue'], 'findIdempotencyKeys').mockReturnValue(new Promise(() => {}))
 
                 const res = await send(hogFlow.id, authorized(), {
                     ...body,
@@ -5738,30 +5738,6 @@ describe('CDP API', () => {
                 expect(intakeRunsOf(intakeRecords()).map(({ id }) => id)).toEqual([runIdOf(small)])
             })
 
-            it('answers each recipient the broker has not acked by the deadline as unconfirmed, and a retry publishes the same runs', async () => {
-                const recipients = [recipient('ada@example.com'), recipient('bo@example.com')]
-                const heldAcks = holdKafkaAcks(api['config'].CDP_INTAKE_TRANSACTIONAL_EMAIL_TOPIC)
-                let unacked: supertest.Response
-                try {
-                    unacked = await sendBatch(TEMPLATE, { variables: body.variables, recipients })
-                } finally {
-                    heldAcks.release()
-                }
-
-                const retry = await sendBatch(TEMPLATE, { variables: body.variables, recipients })
-
-                expect(unacked.body.results).toEqual(
-                    recipients.map((r) => ({
-                        status: 503,
-                        body: { error: 'intake_unavailable', invocation_id: runIdOf(r) },
-                    }))
-                )
-                expect(retry.body.results).toEqual(recipients.map((r) => ({ status: 202, body: queuedAs(runIdOf(r)) })))
-                expect(intakeRunsOf(intakeRecords()).map(({ id }) => id)).toEqual(
-                    [...recipients, ...recipients].map(runIdOf)
-                )
-            })
-
             describe('on a pod of its own', () => {
                 const served: { cdpApi: CdpApi; server: Server }[] = []
                 const servedWith = async (
@@ -5818,6 +5794,52 @@ describe('CDP API', () => {
                         })
                     )
                 })
+                it('answers each recipient the broker has not acked by the deadline as unconfirmed, keeps its admission until the broker settles, and a retry publishes the same runs', async () => {
+                    const { app: own } = await servedWith({ CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_REQUESTS: 1 })
+                    const recipients = [recipient('ada@example.com'), recipient('bo@example.com')]
+                    const heldAcks = holdKafkaAcks(api['config'].CDP_INTAKE_TRANSACTIONAL_EMAIL_TOPIC)
+                    let unacked: supertest.Response
+                    let whileUnsettled: supertest.Response
+                    try {
+                        unacked = await sendBatchTo(own, TEMPLATE, batchOf(...recipients))
+                        whileUnsettled = await sendBatchTo(own, TEMPLATE, batchOf(recipient('cy@example.com')))
+                    } finally {
+                        heldAcks.release()
+                    }
+                    let retry: supertest.Response | undefined
+                    await waitForExpect(async () => {
+                        retry = await sendBatchTo(own, TEMPLATE, batchOf(...recipients))
+                        expect(retry.status).toEqual(200)
+                    })
+
+                    expect(unacked.body.results).toEqual(
+                        recipients.map((r) => ({
+                            status: 503,
+                            body: { error: 'intake_unavailable', invocation_id: runIdOf(r) },
+                        }))
+                    )
+                    expect([whileUnsettled.status, whileUnsettled.body]).toEqual([503, { error: 'over_capacity' }])
+                    expect(retry!.body.results).toEqual(
+                        recipients.map((r) => ({ status: 202, body: queuedAs(runIdOf(r)) }))
+                    )
+                    expect(intakeRunsOf(intakeRecords()).map(({ id }) => id)).toEqual(
+                        [...recipients, ...recipients].map(runIdOf)
+                    )
+                })
+
+                it('refuses a batch whose checks run past the deadline, and publishes none of it', async () => {
+                    const { app: own } = await servedWith({ CDP_TRANSACTIONAL_EMAIL_BATCH_DEADLINE_MS: 500 })
+                    jest.spyOn(
+                        served[served.length - 1].cdpApi['teamWorkflowsConfigService'],
+                        'getEmailSendingSuspension'
+                    ).mockReturnValue(new Promise(() => {}))
+
+                    const res = await sendBatchTo(own, TEMPLATE, batchOf(recipient('ada@example.com')))
+
+                    expect([res.status, res.body]).toEqual([503, { error: 'deadline_exceeded' }])
+                    expect(publishedTo()).toEqual([])
+                })
+
                 it('frees its admission when the caller leaves before the body arrives', async () => {
                     const { app: own, port } = await servedWith({ CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_REQUESTS: 1 })
                     const leaving = postRaw(port, { 'Content-Length': '100000' })

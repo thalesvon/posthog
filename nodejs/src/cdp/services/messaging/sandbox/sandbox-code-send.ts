@@ -39,13 +39,6 @@ export function senderOfCodeSend(
     return { kind: 'email_sandbox' }
 }
 
-export async function refuseSandboxCodeSend(
-    db: PostgresRouter,
-    { recipient, ...request }: { enabled: boolean; teamId: number; recipient: string; tenantName: string }
-): Promise<SandboxCodeSendRefusal | null> {
-    return (await refuseSandboxCodeSends(db, { ...request, recipients: [recipient] }))[0]
-}
-
 export async function refuseSandboxCodeSends(
     db: PostgresRouter,
     {

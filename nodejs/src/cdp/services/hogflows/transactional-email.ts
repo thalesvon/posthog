@@ -322,10 +322,10 @@ export const transactionalEmailStageDurationMs = new Histogram({
     buckets: [1, 2.5, 5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000],
 })
 
-// The stages of a request run back to back, so starting a stage ends the one before it. finish() records each stage
-// once, with its summed time, so a stage entered twice (idempotency) still counts as one observation per request.
 export type TransactionalEmailRoute = 'single' | 'batch'
 
+// The stages of a request run back to back, so starting a stage ends the one before it. finish() records each stage
+// once, with its summed time, so a stage entered twice (idempotency) still counts as one observation per request.
 export class TransactionalEmailStageTimer {
     private readonly startedAt = performance.now()
     private current: { stage: TransactionalEmailStage; startedAt: number } | null = null

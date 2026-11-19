@@ -116,12 +116,8 @@ export class BatchCapacity {
             return null
         }
         this.admitted++
-        let released = false
         return () => {
-            if (!released) {
-                released = true
-                this.admitted--
-            }
+            this.admitted--
         }
     }
 }

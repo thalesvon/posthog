@@ -58,6 +58,7 @@ import {
     TransactionalSendRefusal,
     transactionalEmailRecipients,
 } from './transactional-email'
+import { withinDeadline } from './transactional-email-batch'
 
 const ACCEPTED_SEND_FINGERPRINT_MARKER = 'accepted_send'
 const SCHEDULED_AT_FINGERPRINT_MARKER = 'scheduled_at'
@@ -219,19 +220,35 @@ export type TransactionalSendsDeps = {
     emailValidation: EmailValidationService
     quotaLimiting: QuotaLimiting
     attachmentUploads: AttachmentUploads
-    refuseSandboxSend: (teamId: number, recipient: string) => Promise<SandboxCodeSendRefusal | null>
     refuseSandboxSends: (teamId: number, recipients: string[]) => Promise<(SandboxCodeSendRefusal | null)[]>
 }
 
 export type KeyedTransactionalEmailRequest = TransactionalEmailRequest & { idempotency_key: string }
 
-export type BatchAcceptance = { refused: TransactionalSendRefusal } | { results: TransactionalSendResult[] }
+export type BatchAcceptance =
+    | { refused: TransactionalSendRefusal | 'deadline_exceeded' }
+    | { results: TransactionalSendResult[] }
 
 type BatchChecks = { refusal: TransactionalSendRefusal | null; recipientRefusals: (TransactionalSendRefusal | null)[] }
 
 // The id a keyed send's run gets, which a refusal names too, so the caller can read the send's status by it.
 export const transactionalEmailRunId = (teamId: number, idempotencyKey: string): string =>
     keyedRunId(teamId, RUN_SCOPE, idempotencyKey)
+
+const stampKeyedRun = (
+    invocation: CyclotronJobInvocationHogFlow,
+    idempotencyKey: string,
+    fingerprint: TransactionalEmailFingerprint,
+    reply: QueuedReply
+): void => {
+    invocation.state.idempotencyKey = {
+        hash: IdempotencyKeys.hash(idempotencyKey),
+        ...storedFingerprint(fingerprint),
+        ...(reply.senderKind ? { senderKind: reply.senderKind } : {}),
+        replayFields: reply.replayFields,
+        ...(reply.scheduledAt && { scheduledAt: reply.scheduledAt }),
+    }
+}
 
 export type SendFiles = {
     shape: FilesWorkflowShape | null
@@ -461,21 +478,16 @@ export class TransactionalSends {
                 }
             }
             invocation.state.statusAt = statusAt.toISOString()
+            const reply: QueuedReply = {
+                replayFields: attachmentTotals,
+                scheduledAt: scheduledAt?.toISOString(),
+                senderKind,
+            }
             if (idempotencyKey) {
-                invocation.state.idempotencyKey = {
-                    hash: IdempotencyKeys.hash(idempotencyKey),
-                    ...storedFingerprint(fingerprint),
-                    ...(senderKind ? { senderKind } : {}),
-                    replayFields: attachmentTotals,
-                    ...(scheduledAt && { scheduledAt: scheduledAt.toISOString() }),
-                }
+                stampKeyedRun(invocation, idempotencyKey, fingerprint, reply)
             }
             if (run.claim) {
-                run.claim.reply = {
-                    replayFields: attachmentTotals,
-                    scheduledAt: scheduledAt?.toISOString(),
-                    senderKind,
-                } satisfies QueuedReply
+                run.claim.reply = reply
             }
             if (isAsync) {
                 stages.start('intake_produce')
@@ -579,22 +591,31 @@ export class TransactionalSends {
         hogFlow: HogFlow,
         requests: KeyedTransactionalEmailRequest[],
         stages: TransactionalEmailStageTimer,
-        sender: CodeSendSender = { kind: 'own' }
+        sender: CodeSendSender,
+        { deadline, settlement }: { deadline: AbortSignal; settlement: PublishSettlement }
     ): Promise<BatchAcceptance> {
         if (sender.kind === 'refused') {
             return { refused: sender.refusal }
         }
         const senderKind = sender.kind === 'email_sandbox' ? sender.kind : undefined
         stages.start('checks')
-        const checks = await this.withinRefusalBudget(
-            team.id,
-            hogFlow,
-            () => this.batchChecks(team.id, hogFlow, senderKind, requests),
-            (quotaLimited): BatchChecks => ({
-                refusal: quotaLimited ? 'quota_limited' : null,
-                recipientRefusals: requests.map(() => null),
-            })
+        // The quota lookup that follows a late check has no bound of its own, and nothing may go out after the caller
+        // stopped waiting.
+        const checks = await withinDeadline(
+            this.withinRefusalBudget(
+                team.id,
+                hogFlow,
+                () => this.batchChecks(team.id, hogFlow, senderKind, requests),
+                (quotaLimited): BatchChecks => ({
+                    refusal: quotaLimited ? 'quota_limited' : null,
+                    recipientRefusals: requests.map(() => null),
+                })
+            ),
+            deadline
         )
+        if (checks === 'deadline_exceeded') {
+            return { refused: 'deadline_exceeded' }
+        }
         if (checks.refusal) {
             return { refused: checks.refusal }
         }
@@ -641,18 +662,12 @@ export class TransactionalSends {
                     return { outcome: refusal }
                 }
                 invocation.state.statusAt = statusAt
-                invocation.state.idempotencyKey = {
-                    hash: IdempotencyKeys.hash(request.idempotency_key),
-                    ...storedFingerprint(fingerprint),
-                    ...(senderKind ? { senderKind } : {}),
-                    replayFields: NO_ATTACHMENTS,
-                }
                 const reply: QueuedReply = { replayFields: NO_ATTACHMENTS, senderKind }
-                const produced = await this.deps.runIntake.produce({
-                    kind: 'transactional-email',
-                    invocation,
-                    claim: { fingerprint: fingerprint.current, reply },
-                })
+                stampKeyedRun(invocation, request.idempotency_key, fingerprint, reply)
+                const produced = await this.deps.runIntake.produce(
+                    { kind: 'transactional-email', invocation, claim: { fingerprint: fingerprint.current, reply } },
+                    settlement
+                )
                 return producedResult(produced, invocation.id, null, NO_ATTACHMENTS, senderKind)
             })
         )
@@ -809,7 +824,7 @@ export class TransactionalSends {
             return 'not_sendable'
         }
         if (senderKind === 'email_sandbox') {
-            const sandboxRefusal = await this.deps.refuseSandboxSend(teamId, recipients[0])
+            const [sandboxRefusal] = await this.deps.refuseSandboxSends(teamId, [recipients[0]])
             if (sandboxRefusal) {
                 return sandboxRefusal
             }

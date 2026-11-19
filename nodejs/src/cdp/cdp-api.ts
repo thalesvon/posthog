@@ -32,7 +32,7 @@ import {
     SourceWebhookError,
 } from './consumers/cdp-source-webhooks.consumer'
 import { HogTransformerService, createHogTransformerService } from './hog-transformations/hog-transformer.service'
-import { IntakeProducer, intakeModeOf } from './intake/intake-producer'
+import { IntakeProducer, PublishSettlement, intakeModeOf, publishesSettled } from './intake/intake-producer'
 import { RunIntake } from './intake/run-intake'
 import { RerunJobManager } from './rerun/rerun-job.manager'
 import { RerunRequest } from './rerun/rerun-job.types'
@@ -127,7 +127,6 @@ import { UTM_VALUE_LIMIT_CHARS, utmValueOverLimit } from './services/messaging/h
 import { RecipientTokensService } from './services/messaging/recipient-tokens.service'
 import {
     SANDBOX_CODE_SEND_REFUSAL_STATUS,
-    refuseSandboxCodeSend,
     refuseSandboxCodeSends,
     senderOfCodeSend,
 } from './services/messaging/sandbox/sandbox-code-send'
@@ -1699,12 +1698,13 @@ export class CdpApi {
         res: express.Response,
         next: express.NextFunction
     ): void => {
-        const { release, deadline } = res.locals.transactionalEmailBatch as BatchAdmission
+        const { release, deadline, arrivedAt } = res.locals.transactionalEmailBatch as BatchAdmission
         const encoding = req.headers['content-encoding']
         if (encoding !== undefined && encoding.trim().toLowerCase() !== 'identity') {
             release()
             transactionalEmailBatchRequestsTotal.inc({ outcome: 'invalid_request' })
             res.status(BODY_READ_REFUSAL_STATUS.invalid_request).json({ error: 'invalid_request' })
+            transactionalEmailBatchDurationMs.observe(performance.now() - arrivedAt)
             return
         }
         void readBatchBody((done) => this.transactionalEmailBatchBody(req, res, done), {
@@ -1718,6 +1718,7 @@ export class CdpApi {
             transactionalEmailBatchRequestsTotal.inc({ outcome: read })
             if (read !== 'abandoned') {
                 res.status(BODY_READ_REFUSAL_STATUS[read]).json({ error: read })
+                transactionalEmailBatchDurationMs.observe(performance.now() - arrivedAt)
             }
         })
     }
@@ -1727,6 +1728,7 @@ export class CdpApi {
         async (req: ModifiedRequest, res: express.Response): Promise<any> => {
             const { release, deadline, arrivedAt } = res.locals.transactionalEmailBatch as BatchAdmission
             const stages = new TransactionalEmailStageTimer('batch')
+            const settlement = new PublishSettlement()
             const refuse = (outcome: string, status: number, body: Record<string, unknown>) => {
                 transactionalEmailBatchRequestsTotal.inc({ outcome })
                 return res.status(status).json(body)
@@ -1770,33 +1772,35 @@ export class CdpApi {
                 }
 
                 stages.start('validate')
-                const replies: (SlotReply | undefined)[] = []
                 const keyed: KeyedTransactionalEmailRequest[] = []
-                for (const recipient of batch.recipients) {
+                const slots = batch.recipients.map((recipient): number | SlotReply => {
                     const request = BatchSlotRequestSchema.safeParse(slotRequestOf(batch, recipient))
-                    if (request.success) {
-                        keyed.push(request.data)
-                        replies.push(undefined)
-                    } else {
-                        replies.push(invalidSendReplyOf(request.error, { team_id: teamId, hog_flow_id: hogFlow.id }))
-                    }
-                }
-                const sender = batch.send ? senderOfCodeSend(team.id, batch.send, integration) : undefined
+                    return request.success
+                        ? keyed.push(request.data) - 1
+                        : invalidSendReplyOf(request.error, { team_id: teamId, hog_flow_id: hogFlow.id })
+                })
+                const sender = batch.send
+                    ? senderOfCodeSend(team.id, batch.send, integration)
+                    : { kind: 'own' as const }
                 const accepted = await this.transactionalSendsForRequest().acceptBatch(
                     team,
                     hogFlow,
                     keyed,
                     stages,
-                    sender
+                    sender,
+                    { deadline, settlement }
                 )
                 if ('refused' in accepted) {
-                    return refuse(accepted.refused, TRANSACTIONAL_SEND_REFUSAL_STATUS[accepted.refused], {
-                        error: accepted.refused,
-                    })
+                    const status =
+                        accepted.refused === 'deadline_exceeded'
+                            ? 503
+                            : TRANSACTIONAL_SEND_REFUSAL_STATUS[accepted.refused]
+                    return refuse(accepted.refused, status, { error: accepted.refused })
                 }
-                const acceptedReplies = accepted.results.map(sendReplyOf)
                 const results = batch.recipients.map((recipient, i) => {
-                    const { outcome, status, body } = replies[i] ?? acceptedReplies.shift()!
+                    const slot = slots[i]
+                    const { outcome, status, body } =
+                        typeof slot === 'number' ? sendReplyOf(accepted.results[slot]) : slot
                     transactionalEmailRequestsTotal.inc({ outcome, route: 'batch' })
                     return {
                         status,
@@ -1813,7 +1817,9 @@ export class CdpApi {
             } finally {
                 stages.finish()
                 transactionalEmailBatchDurationMs.observe(performance.now() - arrivedAt)
-                release()
+                // A publish outlives its ack deadline, so the batch keeps its admission until the broker settles every
+                // publish. Otherwise retries of unacked batches would pile up publishes the request cap never counts.
+                void publishesSettled(settlement).then(release)
             }
         }
 
@@ -1967,13 +1973,6 @@ export class CdpApi {
             emailValidation: this.emailValidationService,
             quotaLimiting: this.deps.quotaLimiting,
             attachmentUploads: this.attachmentUploads,
-            refuseSandboxSend: (teamId, recipient) =>
-                refuseSandboxCodeSend(this.deps.postgres, {
-                    enabled: this.config.WORKFLOWS_SANDBOX_SENDER_ENABLED,
-                    teamId,
-                    recipient,
-                    tenantName: this.config.SES_SANDBOX_TENANT_NAME,
-                }),
             refuseSandboxSends: (teamId, recipients) =>
                 refuseSandboxCodeSends(this.deps.postgres, {
                     enabled: this.config.WORKFLOWS_SANDBOX_SENDER_ENABLED,
