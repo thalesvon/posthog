@@ -1,3 +1,4 @@
+import { PublishSettlement } from '../../intake/intake-producer'
 import { Semaphore } from '../../utils/sempahore'
 import {
     BatchCapacity,
@@ -71,7 +72,7 @@ describe('runBatchSlots', () => {
 
         const first = await run(['a'], (item, slot) => {
             ran.push(item)
-            slot.settlement.track(publish.opened)
+            PublishSettlement.track(slot.settlement, publish.opened)
             return Promise.resolve(queued(item))
         })
         const second = run(['b'], (item) => {
