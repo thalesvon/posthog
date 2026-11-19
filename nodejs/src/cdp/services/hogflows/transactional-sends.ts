@@ -69,7 +69,7 @@ const NO_ATTACHMENTS = { attachment_count: 0, attachment_bytes: 0 }
 const PRIORITY_CLASS: EmailQueuePriorityClass = 'fast'
 const RUN_SCOPE = 'transactional-email'
 export const FINGERPRINT_PURPOSE = 'transactional_email_idempotency_fingerprint'
-const ASYNC_REFUSAL_BUDGET_MS = 1_000
+export const ASYNC_REFUSAL_BUDGET_MS = 1_000
 
 const refusalFailOpenCounter = new Counter({
     name: 'cdp_transactional_email_refusal_fail_open_total',
@@ -638,6 +638,10 @@ export class TransactionalSends {
             runs.map(({ invocation, fingerprint }) => ({ runId: invocation.id, fingerprint: fingerprint.current })),
             'transactional-email'
         )
+        // The recall has a budget of its own that can end after the request deadline.
+        if (deadline.aborted) {
+            return { refused: 'deadline_exceeded' }
+        }
 
         stages.start('intake_produce')
         const statusAt = new Date().toISOString()

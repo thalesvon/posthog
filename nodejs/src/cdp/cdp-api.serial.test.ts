@@ -85,7 +85,7 @@ import {
     transactionalEmailRequestsTotal,
     transactionalEmailStageDurationMs,
 } from './services/hogflows/transactional-email'
-import { FINGERPRINT_PURPOSE } from './services/hogflows/transactional-sends'
+import { ASYNC_REFUSAL_BUDGET_MS, FINGERPRINT_PURPOSE } from './services/hogflows/transactional-sends'
 import { CyclotronJobQueuePostgresV2 } from './services/job-queue/job-queue-postgres-v2'
 import { SEND_NEEDS_FILES_FOR_MS } from './services/messaging/attachment-horizon'
 import {
@@ -5602,7 +5602,12 @@ describe('CDP API', () => {
                             [team.id],
                             'suspend-email-sending'
                         )
-                        api['teamWorkflowsConfigService']['lazyLoader'].markForRefresh(String(team.id))
+                        await hub.pubSub.publish('reload-team-workflows-config', JSON.stringify({ teamId: team.id }))
+                        await waitForExpect(async () =>
+                            expect(await api['teamWorkflowsConfigService'].getEmailSendingSuspension(team.id)).toEqual(
+                                'staff'
+                            )
+                        )
                     },
                 ],
             ])(
@@ -5812,15 +5817,18 @@ describe('CDP API', () => {
                         })
                     )
                 })
-                it('answers each recipient the broker has not acked by the deadline as unconfirmed, keeps its admission until the broker settles, and a retry publishes the same runs', async () => {
+                it('answers each recipient the broker has not acked by the deadline as unconfirmed, keeps its admission until the broker settles every publish, and a retry publishes the same runs', async () => {
                     const { app: own } = await servedWith({ CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_REQUESTS: 1 })
                     const recipients = [recipient('ada@example.com'), recipient('bo@example.com')]
                     const heldAcks = holdKafkaAcks(api['config'].CDP_INTAKE_TRANSACTIONAL_EMAIL_TOPIC)
                     let unacked: supertest.Response
                     let whileUnsettled: supertest.Response
+                    let whileOneUnsettled: supertest.Response
                     try {
                         unacked = await sendBatchTo(own, TEMPLATE, batchOf(...recipients))
                         whileUnsettled = await sendBatchTo(own, TEMPLATE, batchOf(recipient('cy@example.com')))
+                        heldAcks.releaseOne()
+                        whileOneUnsettled = await sendBatchTo(own, TEMPLATE, batchOf(recipient('dee@example.com')))
                     } finally {
                         heldAcks.release()
                     }
@@ -5837,6 +5845,10 @@ describe('CDP API', () => {
                         }))
                     )
                     expect([whileUnsettled.status, whileUnsettled.body]).toEqual([503, { error: 'over_capacity' }])
+                    expect([whileOneUnsettled.status, whileOneUnsettled.body]).toEqual([
+                        503,
+                        { error: 'over_capacity' },
+                    ])
                     expect(retry!.body.results).toEqual(
                         recipients.map((r) => ({ status: 202, body: queuedAs(runIdOf(r)) }))
                     )
@@ -5845,18 +5857,44 @@ describe('CDP API', () => {
                     )
                 })
 
-                it('refuses a batch whose checks run past the deadline, and publishes none of it', async () => {
-                    const { app: own } = await servedWith({ CDP_TRANSACTIONAL_EMAIL_BATCH_DEADLINE_MS: 500 })
-                    jest.spyOn(
-                        served[served.length - 1].cdpApi['teamWorkflowsConfigService'],
-                        'getEmailSendingSuspension'
-                    ).mockReturnValue(new Promise(() => {}))
+                const whileLocked = async <T>(
+                    databaseUrl: string | undefined,
+                    table: string,
+                    work: () => Promise<T>
+                ): Promise<T> => {
+                    const locking = new Pool({ connectionString: databaseUrl, max: 1 })
+                    const client = await locking.connect()
+                    try {
+                        await client.query('BEGIN')
+                        await client.query(`LOCK TABLE ${table} IN ACCESS EXCLUSIVE MODE`)
+                        return await work()
+                    } finally {
+                        await client.query('ROLLBACK')
+                        client.release()
+                        await locking.end()
+                    }
+                }
 
-                    const res = await sendBatchTo(own, TEMPLATE, batchOf(recipient('ada@example.com')))
+                it.each([
+                    // The pod's own workflows config cache is cold, so the suspension check reads the locked table.
+                    ['its checks stall', () => hub.DATABASE_URL, 'workflows_teamworkflowsconfig', 500],
+                    // The deadline is shorter than the claim recall's own budget, so it ends while the recall waits.
+                    ['its claim read stalls', () => hub.CYCLOTRON_NODE_DATABASE_URL, 'cyclotron_jobs', 200],
+                ])(
+                    'refuses a batch at its deadline and publishes none of it when %s',
+                    async (_stall, databaseUrl, table, deadlineMs) => {
+                        const { app: own } = await servedWith({ CDP_TRANSACTIONAL_EMAIL_BATCH_DEADLINE_MS: deadlineMs })
 
-                    expect([res.status, res.body]).toEqual([503, { error: 'deadline_exceeded' }])
-                    expect(publishedTo()).toEqual([])
-                })
+                        const started = Date.now()
+                        const res = await whileLocked(databaseUrl(), table, () =>
+                            sendBatchTo(own, TEMPLATE, batchOf(recipient('ada@example.com')))
+                        )
+
+                        expect([res.status, res.body]).toEqual([503, { error: 'deadline_exceeded' }])
+                        expect(Date.now() - started).toBeLessThan(ASYNC_REFUSAL_BUDGET_MS)
+                        expect(publishedTo()).toEqual([])
+                    }
+                )
 
                 it('frees its admission when the caller leaves before the body arrives', async () => {
                     const { app: own, port } = await servedWith({ CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_REQUESTS: 1 })
