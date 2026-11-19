@@ -61,21 +61,21 @@ def validate_destination_config(
     _, workflow_inputs = DESTINATION_WORKFLOWS[destination_type]
     base_field_names = {field.name for field in dataclasses.fields(BaseBatchExportInputs)}
     workflow_fields = dataclasses.fields(workflow_inputs)
-    destination_fields = {field for field in workflow_fields if field.name not in base_field_names}
+    # TODO: Remove the opt-in once every export reads events_json. Users set this base field in the config, so it
+    # gets the same type check as the destination's own fields.
+    destination_fields = {
+        field
+        for field in workflow_fields
+        if field.name not in base_field_names or field.name == "use_new_events_schema"
+    }
 
     extra_fields = validated.keys() - {field.name for field in destination_fields} - base_field_names
     if extra_fields:
         str_fields = ", ".join(f"'{extra_field}'" for extra_field in sorted(extra_fields))
         raise contracts.InvalidDestinationConfigError(f"Configuration has unknown field/s: {str_fields}")
 
-    # TODO: Remove once every export reads events_json. Users set this base field in the config, so it gets the
-    # same type check as the destination's own fields.
-    new_events_schema_field = next(
-        field for field in dataclasses.fields(BaseBatchExportInputs) if field.name == "use_new_events_schema"
-    )
-
     # Destination config fields without a dataclass default must be provided.
-    for destination_field in destination_fields | {new_events_schema_field}:
+    for destination_field in destination_fields:
         is_required = (
             destination_field.default == dataclasses.MISSING
             and destination_field.default_factory == dataclasses.MISSING
