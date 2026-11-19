@@ -828,6 +828,7 @@ CACHES["codex_login"] = {
     "OPTIONS": {
         **CACHES["default"]["OPTIONS"],
         "CONNECTION_FACTORY": "posthog.caching.codex_login_connection_factory.CodexLoginConnectionFactory",
+        "SERIALIZER": "django_redis.serializers.json.JSONSerializer",
         "SOCKET_CONNECT_TIMEOUT": 1,
         "SOCKET_TIMEOUT": 1,
     },
