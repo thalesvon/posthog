@@ -566,9 +566,8 @@ def _key_workflow_id(team_id: int, key: str) -> UUID:
 
 
 def _require_key_room(team_id: int, key: str) -> None:
-    if known_key(team_id, key) is not None:
-        return
-    if TransactionalEmailKey.objects.for_team(team_id, canonical=True).count() >= TRANSACTIONAL_EMAIL_KEY_LIMIT:
+    keys = TransactionalEmailKey.objects.for_team(team_id, canonical=True)
+    if keys.count() >= TRANSACTIONAL_EMAIL_KEY_LIMIT and known_key(team_id, key) is None:
         raise _too_many_keys()
 
 
@@ -700,7 +699,7 @@ def send_email_batch(
 
 def send_code_email_batch(team: Team, email: CodeEmail, recipients: Sequence[BatchRecipient]) -> EmailBatchSent:
     with transactional_email_stage("workflow_lookup"):
-        accepted_send, sandbox_warning = _accepted_send(team, email)
+        _code_send_sender(team, email, provision_sandbox=False)
         template = _template_for_key(team.id, email.key)
         template_workflow_id = None if template is None else _template_workflow_id(team.id, template, email.sensitive)
         if template_workflow_id is None:
@@ -709,6 +708,7 @@ def send_code_email_batch(team: Team, email: CodeEmail, recipients: Sequence[Bat
     if len(refusals) == len(recipients):
         return EmailBatchSent(results=refusals)
     with transactional_email_stage("workflow_lookup"):
+        accepted_send, sandbox_warning = _accepted_send(team, email)
         hog_flow_id = template_workflow_id or _key_workflow_id(team.id, email.key)
     return _queue_batch(
         team.id,
@@ -825,7 +825,9 @@ def _accepted_attachment(attachment: EmailAttachment) -> dict[str, str]:
     )
 
 
-def _code_send_sender(team: Team, email: CodeEmail) -> tuple[dict[str, Any], SendWarning | None]:
+def _code_send_sender(
+    team: Team, email: CodeEmail, *, provision_sandbox: bool = True
+) -> tuple[dict[str, Any], SendWarning | None]:
     name, address = parseaddr(email.sender) if email.sender else ("", "")
     try:
         sender_id = code_send_sender_id(team_id=team.id, email=address or None)
@@ -842,6 +844,8 @@ def _code_send_sender(team: Team, email: CodeEmail) -> tuple[dict[str, Any], Sen
             SANDBOX_FALLBACKS.labels(outcome="fields_unsupported").inc()
             setup_url = sending_domain_setup(team.id).setup_url
             raise SandboxFieldsUnsupported(SANDBOX_FIELDS_UNSUPPORTED.format(setup_url=setup_url), attr=field) from e
+        if not provision_sandbox:
+            return {}, None
         sandbox_sender_id = provision_sandbox_sender(team, None).id
         logger.info("transactional_email_sandbox_sender_fallback", team_id=team.id, key=email.key)
         return {"integrationId": sandbox_sender_id}, _sandbox_sender_warning(team.id)

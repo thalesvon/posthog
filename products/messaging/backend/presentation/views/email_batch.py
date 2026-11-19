@@ -202,6 +202,8 @@ def refused_batch_field(data: Any, *, takes_template_key: bool) -> ExplainedRefu
         return None
     if field := next((field for field in BATCH_REFUSED_FIELDS if field in data), None):
         return _field_refusal(field)
+    if (unreadable := next((field for field in data if _escaped(field) != field), None)) is not None:
+        return _unreadable_field_refusal(_escaped(unreadable))
     if field := next((field for field in RECIPIENT_FIELDS_OUTSIDE_RECIPIENTS if field in data), None):
         return ExplainedRefusal(
             f"A batch send names each recipient in `recipients`, so it doesn't take `{field}` outside them.",
@@ -219,7 +221,7 @@ def refused_batch_field(data: Any, *, takes_template_key: bool) -> ExplainedRefu
         if field := next((field for field in BATCH_REFUSED_FIELDS if field in recipient), None):
             return _field_refusal(f"recipients__{index}__{field}")
         if (unknown := next((field for field in recipient if field not in RECIPIENT_FIELDS), None)) is not None:
-            field = str(unknown).encode("utf-8", "backslashreplace").decode()
+            field = _escaped(unknown)
             return ExplainedRefusal(
                 f"A batch recipient doesn't take `{field}`, so PostHog didn't send the batch.",
                 code="field_not_accepted",
@@ -302,3 +304,17 @@ def _result(result: QueuedEmail | TransactionalEmailError | DeliveryUnavailable)
         code, detail = result.code, str(result)
         status_code = TransactionalEmailRejected.STATUS_BY_CODE.get(code, status.HTTP_400_BAD_REQUEST)
     return {"error": {"code": code, "detail": detail, "status": status_code, "retryable": code in RETRYABLE_CODES}}
+
+
+def _escaped(field: Any) -> str:
+    return str(field).encode("utf-8", "backslashreplace").decode()
+
+
+def _unreadable_field_refusal(field: str) -> ExplainedRefusal:
+    return ExplainedRefusal(
+        f"A batch send doesn't take `{field}`, so PostHog didn't send the batch.",
+        code="field_not_accepted",
+        attr=field,
+        why="A field name must be valid Unicode text.",
+        fix=f"Remove `{field}` from the batch.",
+    )

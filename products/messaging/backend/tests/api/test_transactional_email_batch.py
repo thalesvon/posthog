@@ -291,6 +291,7 @@ class TestTransactionalEmailBatch(APIBaseTest):
             ("shared_scheduled_at", "code", {"scheduled_at": "2030-01-01T00:00:00Z"}, 400, "scheduled_at"),
             ("shared_to", "template", {"to": "a@example.com"}, 400, "to"),
             ("shared_distinct_id", "code", {"distinct_id": "person-1"}, 400, "distinct_id"),
+            ("shared_field_name_that_is_not_valid_unicode", "code", {"\ud800": 1}, 400, "\\ud800"),
             ("shared_legacy_identifiers", "template", {"identifiers": {"distinct_id": "person-1"}}, 400, "identifiers"),
             (
                 "unverified_sender_and_no_recipient_it_can_address",
@@ -604,8 +605,15 @@ class TestTransactionalEmailBatch(APIBaseTest):
         else:
             assert (batch.status_code, batch.json()) == (single.status_code, single.json())
 
-    def test_a_code_batch_with_no_recipient_it_can_address_creates_nothing(self, mock_post, _flag, _capture):
+    @parameterized.expand([("verified_sender", True), ("sandbox_sender", False)])
+    def test_a_code_batch_with_no_recipient_it_can_address_creates_nothing(
+        self, mock_post, _flag, _capture, _name, verified_sender
+    ):
+        if not verified_sender:
+            Integration.objects.filter(id=self.sender.id).delete()
+            TeamWorkflowsConfig.objects.filter(team_id=self.team.id).update(default_email_integration_id=None)
         workflows = HogFlow.objects.filter(team=self.team).count()
+        integrations = Integration.objects.filter(team=self.team).count()
 
         response = self._batch("code", [{"to": "not an address", "idempotency_key": "key-0"}])
 
@@ -613,26 +621,35 @@ class TestTransactionalEmailBatch(APIBaseTest):
         assert [result["error"]["code"] for result in response.json()["results"]] == ["invalid_recipient"]
         assert not TransactionalEmailKey.objects.for_team(self.team.id, canonical=True).exists()
         assert HogFlow.objects.filter(team=self.team).count() == workflows
+        assert Integration.objects.filter(team=self.team).count() == integrations
         mock_post.assert_not_called()
 
     @parameterized.expand(
         [
-            ("sensitive_template_marked_not_sensitive", True, 100, "sensitive_template"),
-            ("new_key_past_the_key_limit", False, 0, "too_many_keys"),
+            ("sensitive_template_marked_not_sensitive", True, False, 100, "sensitive_template"),
+            ("new_key_past_the_key_limit", False, False, 0, "too_many_keys"),
+            ("known_key_at_the_key_limit", False, True, 1, "invalid_recipient"),
         ]
     )
-    def test_a_code_batch_with_no_recipient_it_can_address_still_refuses_the_shared_email(
-        self, mock_post, _flag, _capture, _name, sensitive_template, key_limit, code
+    def test_a_code_batch_with_no_recipient_it_can_address_answers_as_its_shared_email_does(
+        self, mock_post, _flag, _capture, _name, sensitive_template, key_known, key_limit, code
     ):
         MessageTemplate.objects.filter(id=self.template.id).update(
             key="welcome" if sensitive_template else None, sensitive=sensitive_template
         )
+        if key_known:
+            mock_post.return_value = MagicMock(status_code=202, json=lambda: {"invocation_id": "single"})
+            assert self._single("code").status_code == status.HTTP_202_ACCEPTED
+            mock_post.reset_mock()
+        keys = TransactionalEmailKey.objects.for_team(self.team.id, canonical=True).count()
 
         with patch.object(transactional_email, "TRANSACTIONAL_EMAIL_KEY_LIMIT", key_limit):
             response = self._batch("code", [{"to": "not an address", "idempotency_key": "key-0"}], sensitive=False)
 
-        assert (response.status_code, response.json()["code"]) == (status.HTTP_400_BAD_REQUEST, code)
-        assert not TransactionalEmailKey.objects.for_team(self.team.id, canonical=True).exists()
+        answer = response.json()
+        codes = [result["error"]["code"] for result in answer["results"]] if "results" in answer else [answer["code"]]
+        assert codes == [code], answer
+        assert TransactionalEmailKey.objects.for_team(self.team.id, canonical=True).count() == keys
         mock_post.assert_not_called()
 
     def test_a_batch_while_its_flag_is_off_spends_no_send(self, mock_post, flag, _capture):
