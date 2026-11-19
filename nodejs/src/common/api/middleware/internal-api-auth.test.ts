@@ -219,8 +219,6 @@ describe('createInternalApiAuthMiddleware', () => {
             ['/api/some/other/route/cancel'],
             ['/api/projects/1/hog_flows/some-uuid/reschedule_parked/extra'],
             ['/api/projects/1/hog_flows/some-uuid/transactional_email/send/extra'],
-            ['/api/projects/1/hog_flows/some-uuid/transactional_email/batch/extra'],
-            ['/api/projects/1/hog_flows/some-uuid/transactional_email/send/batch//'],
             ['/api/projects/1/transactional_emails/some-uuid/cancel/extra'],
             ['/api/projects/1/hog_flows/some-uuid/manual_invocations/extra'],
         ])('should still require the secret for %s despite resembling a scoped route', (path) => {
@@ -278,6 +276,9 @@ describe('createInternalApiAuthMiddleware', () => {
             app.post('/api/hog_flows/scheduled_invocations', reached)
             app.post('/api/hog_flows/scheduled_invocations/extra', reached)
             app.post('/api/projects/:team_id/hog_flows/:id/scheduled_invocations', reached)
+            app.post('/api/projects/:team_id/hog_flows/:id/transactional_email/batch', reached)
+            app.post('/api/projects/:team_id/hog_flows/:id/transactional_email/batch/extra', reached)
+            app.post('/api/projects/:team_id/hog_flows/:id/transactional_email/send/batch', reached)
             server = app.listen(0, () => {})
         })
 
@@ -307,9 +308,25 @@ describe('createInternalApiAuthMiddleware', () => {
         })
 
         it.each([
+            ['/api/projects/1/hog_flows/some-uuid/transactional_email/batch'],
+            ['/api/projects/1/hog_flows/some-uuid/transactional_email/batch/'],
+            ['/api/projects/1/hog_flows/some-uuid/transactional_email/send/batch'],
+            ['/api/projects/1/hog_flows/some-uuid/transactional_email/send/batch/'],
+        ])(
+            'lets a batch without the shared secret reach its handler on %s, which checks its own token',
+            async (path) => {
+                const res = await supertest(app).post(path).send({})
+
+                expect(res.status).toEqual(200)
+            }
+        )
+
+        it.each([
             ['/api/hog_flows/scheduled_invocations/extra'],
             ['/api/projects/1/hog_flows/some-uuid/scheduled_invocations'],
-        ])('answers 401 without the shared secret for %s, which has no token of its own', async (path) => {
+            ['/api/projects/1/hog_flows/some-uuid/transactional_email/batch/extra'],
+            ['/api/projects/1/hog_flows/some-uuid/transactional_email/send/batch//'],
+        ])('answers 401 without the shared secret for %s, which no scoped-token route takes', async (path) => {
             const res = await supertest(app).post(path).send({})
 
             expect(res.status).toEqual(401)

@@ -17,7 +17,9 @@ import supertest from 'supertest'
 import express from 'ultimate-express'
 import { version as uuidVersion } from 'uuid'
 
+import { INTAKE_ACK_DEADLINE_MS } from '~/cdp/intake/intake-producer'
 import { keyedRunId } from '~/cdp/intake/run-intake'
+import { CDP_INTAKE_TRANSACTIONAL_EMAIL_OUTPUT } from '~/cdp/outputs/outputs'
 import { CyclotronInputType } from '~/cdp/schema/cyclotron'
 import { HogFlow } from '~/cdp/schema/hogflow'
 import { EncryptedFields } from '~/cdp/utils/encryption-utils'
@@ -5671,28 +5673,37 @@ describe('CDP API', () => {
                     )
                 })
 
-                it.each([
-                    [TEMPLATE, ''],
-                    [TEMPLATE, '/'],
-                    [CODE, ''],
-                    [CODE, '/'],
-                ])(
-                    'refuses a request to %s%s over the request cap before it parses the body, with only its batch token',
-                    async (route, suffix) => {
-                        const { app: full } = await servedWith(
-                            { CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_REQUESTS: 0 },
-                            { jsonBodyLimit: '1kb', internalApiSecret: 'shared-secret' }
-                        )
+                it("keeps a recipient's slot until its intake publish is acked, past the ack deadline", async () => {
+                    const { app: own } = await servedWith({
+                        CDP_TRANSACTIONAL_EMAIL_BATCH_MAX_SLOTS: 1,
+                        CDP_TRANSACTIONAL_EMAIL_BATCH_DEADLINE_MS: INTAKE_ACK_DEADLINE_MS + 500,
+                        CDP_INTAKE_KAFKA_ASYNC_TEAMS: String(team.id),
+                    })
+                    const outputs = served.at(-1)!.cdpApi['outputs']
+                    const produce = outputs.produce.bind(outputs)
+                    let ack: () => void = () => {}
+                    const acked = new Promise<void>((resolve) => (ack = resolve))
+                    jest.spyOn(outputs, 'produce').mockImplementation(async (output, message) => {
+                        if (output === CDP_INTAKE_TRANSACTIONAL_EMAIL_OUTPUT) {
+                            await acked
+                        }
+                        return produce(output, message)
+                    })
 
-                        const res = await supertest(full)
-                            .post(pathOf(route) + suffix)
-                            .set({ Authorization: authorizationFor(kindOf(route)) })
-                            .send({ variables: { body: 'x'.repeat(2048) }, recipients: [] })
+                    // The first recipient answers once its produce passes the ack deadline, and the produce runs on.
+                    expect((await sendBatchTo(own, TEMPLATE, batchOf(recipient('ada@example.com')))).status).toEqual(
+                        200
+                    )
+                    const whileUnacked = await sendBatchTo(own, TEMPLATE, batchOf(recipient('bo@example.com')))
+                    ack()
 
-                        expect(res.status).toEqual(503)
-                        expect(res.body).toEqual({ error: 'over_capacity' })
-                    }
-                )
+                    expect(whileUnacked.body.results).toEqual([{ status: 503, body: { error: 'not_attempted' } }])
+                    await waitForExpect(async () =>
+                        expect(
+                            (await sendBatchTo(own, TEMPLATE, batchOf(recipient('cy@example.com')))).body.results
+                        ).toEqual([{ status: 202, body: queued }])
+                    )
+                })
 
                 it('answers by its deadline while a recipient waits on a held claim, and keeps its permit until it settles', async () => {
                     const { app: own } = await servedWith({

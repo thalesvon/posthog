@@ -27,6 +27,14 @@ const PUBLIC_PATH_PREFIXES = ['/public/', '/_health', '/_ready', '/_metrics', '/
 // caller-controlled trailing segment (e.g. batch_invocations' :parent_run_id), so a bare suffix
 // like '/cancel' would let a crafted id inherit the exemption and reach a handler that never
 // checks a token.
+// The routes of CdpApi.postTransactionalEmailBatch. Express routing is not strict, so each route also takes its path
+// with a trailing slash, and these match it too. The scoped-auth exemption and the router's body-parser skip both use
+// this list, so the two checks stay aligned.
+export const TRANSACTIONAL_EMAIL_BATCH_PATH_PATTERNS = [
+    /^\/api\/projects\/[^/]+\/hog_flows\/[^/]+\/transactional_email\/batch\/?$/,
+    /^\/api\/projects\/[^/]+\/hog_flows\/[^/]+\/transactional_email\/send\/batch\/?$/,
+]
+
 const SCOPED_AUTH_PATH_PATTERNS = [
     // CdpApi.postHogFlowRescheduleParked, verified against WORKFLOWS_RESCHEDULE_JWT_SECRET.
     /^\/api\/projects\/[^/]+\/hog_flows\/[^/]+\/reschedule_parked$/,
@@ -41,9 +49,8 @@ const SCOPED_AUTH_PATH_PATTERNS = [
     // CdpApi.postTransactionalEmail, verified against WORKFLOWS_TRANSACTIONAL_EMAIL_JWT_SECRET, audience-pinned.
     /^\/api\/projects\/[^/]+\/hog_flows\/[^/]+\/transactional_email$/,
     /^\/api\/projects\/[^/]+\/hog_flows\/[^/]+\/transactional_email\/send$/,
-    // CdpApi.postTransactionalEmailBatch, one token kind per route, which Express also serves with a trailing slash.
-    /^\/api\/projects\/[^/]+\/hog_flows\/[^/]+\/transactional_email\/batch\/?$/,
-    /^\/api\/projects\/[^/]+\/hog_flows\/[^/]+\/transactional_email\/send\/batch\/?$/,
+    // CdpApi.postTransactionalEmailBatch, one token kind per route.
+    ...TRANSACTIONAL_EMAIL_BATCH_PATH_PATTERNS,
     /^\/api\/projects\/[^/]+\/transactional_email\/attachments\/uploads$/,
     /^\/api\/projects\/[^/]+\/transactional_emails\/[^/]+\/cancel$/,
     /^\/api\/projects\/[^/]+\/transactional_emails\/[^/]+\/reschedule$/,

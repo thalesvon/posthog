@@ -3,7 +3,10 @@ import express, { NextFunction, Request, Response } from 'ultimate-express'
 
 import { corsMiddleware } from '~/common/api/middleware/cors'
 import { httpMetricsMiddleware } from '~/common/api/middleware/http-metrics'
-import { createInternalApiAuthMiddleware } from '~/common/api/middleware/internal-api-auth'
+import {
+    TRANSACTIONAL_EMAIL_BATCH_PATH_PATTERNS,
+    createInternalApiAuthMiddleware,
+} from '~/common/api/middleware/internal-api-auth'
 import { logger } from '~/common/utils/logger'
 import { HealthCheckResultError, PluginServerService } from '~/types'
 
@@ -41,13 +44,8 @@ export interface SetupExpressAppOptions {
 
 const READ_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
 
-// Routes that parse their own body after admission. Anchored to exactly one route each, like the scoped-auth patterns.
-const ROUTE_PARSED_BODY_PATTERNS = [
-    // CdpApi.postTransactionalEmailBatch
-    // Express routing is not strict, so the route also takes the path with a trailing slash. These match it too.
-    /^\/api\/projects\/[^/]+\/hog_flows\/[^/]+\/transactional_email\/batch\/?$/,
-    /^\/api\/projects\/[^/]+\/hog_flows\/[^/]+\/transactional_email\/send\/batch\/?$/,
-]
+// Routes that parse their own body after admission.
+const ROUTE_PARSED_BODY_PATTERNS = TRANSACTIONAL_EMAIL_BATCH_PATH_PATTERNS
 
 export function setupCommonRoutes(
     app: express.Application,
