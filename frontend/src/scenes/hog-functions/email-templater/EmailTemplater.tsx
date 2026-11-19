@@ -57,6 +57,7 @@ import { EmailSenderRow } from './EmailSenderRow'
 import { EMAIL_TYPE_SUPPORTED_FIELDS, EmailTemplaterLogicProps, emailTemplaterLogic } from './emailTemplaterLogic'
 import { LiquidSupportedText } from './LiquidSupportedText'
 import { OptionalHeaderFieldRow } from './OptionalHeaderFieldRow'
+import { EmailPersonPreview } from './preview/EmailPersonPreview'
 import { SandboxSenderChoiceContext } from './SandboxSenderChoiceContext'
 import {
     SANDBOX_SENDER_VALUE,
@@ -860,7 +861,8 @@ function NativeEmailTemplaterForm({
 }
 
 function EmailContentPreview({ buttonsAt }: { buttonsAt: 'bottom' | 'center' }): JSX.Element {
-    const { emailTemplate } = useValues(emailTemplaterLogic)
+    const { emailTemplate, templatingEngine } = useValues(emailTemplaterLogic)
+    const personPreviewEnabled = useFeatureFlag('WORKFLOWS_EMAIL_PERSON_PREVIEW')
 
     return (
         <LemonField name="html" className="group/email-preview flex relative flex-col flex-1">
@@ -883,7 +885,11 @@ function EmailContentPreview({ buttonsAt }: { buttonsAt: 'bottom' | 'center' }):
                         />
                     </div>
 
-                    <EmailBodyPreview html={value} text={emailTemplate.text} />
+                    {personPreviewEnabled && templatingEngine === 'liquid' && (value || emailTemplate.text) ? (
+                        <EmailPersonPreview html={value} text={emailTemplate.text} />
+                    ) : (
+                        <EmailBodyPreview html={value} text={emailTemplate.text} />
+                    )}
                 </>
             )}
         </LemonField>
