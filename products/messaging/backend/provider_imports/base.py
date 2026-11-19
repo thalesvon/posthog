@@ -82,6 +82,8 @@ class ImportContext:
     steps: tuple[str, ...] = ()
     # Names what the run stores, so a retried page overwrites what it stored before.
     run_id: str = ""
+    # The steps of the run that completed before this one started.
+    completed_steps: tuple[str, ...] = ()
 
 
 ImportItemStatus = Literal["created", "skipped", "failed", "listed"]

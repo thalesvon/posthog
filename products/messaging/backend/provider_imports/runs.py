@@ -141,6 +141,9 @@ def run_step(team_id: int, run_id: UUID, step: str, attempt: int) -> list[People
         api_key=run.temporary_api_key,
         steps=tuple(run.steps),
         run_id=str(run_id),
+        completed_steps=tuple(
+            key for key in run.steps if run.progress.get(key, {}).get("status") == ImportStepStatus.COMPLETED.value
+        ),
     )
     try:
         _check_required_steps(provider, run, step)
