@@ -132562,7 +132562,7 @@ export namespace Schemas {
     }
 
     export interface _TracingLatencyPercentilesRequest {
-      /** The latency-percentiles query to execute. */
+      /** The latency percentiles query to execute. */
       query: _TracingTimeseriesQueryBody;
     }
 
