@@ -376,9 +376,9 @@ def batch_body_too_large() -> ExplainedRefusal:
 
 def batch_not_admitted() -> ExplainedRefusal:
     return ExplainedRefusal(
-        "The email pipeline was at capacity, so this request queued none of the batch's emails. Send the batch again "
-        "with the same `idempotency_key` for each recipient within 24 hours of the first request that used it, so "
-        "each email goes out once even if an earlier request queued it.",
+        "The email pipeline was at capacity and turned this batch away. Send the batch again with the same "
+        "`idempotency_key` for each recipient within 24 hours of the first request that used it, so each email goes "
+        "out once even if an earlier attempt queued it.",
         code="delivery_unavailable",
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         why="PostHog's email pipeline was handling as many batches as it can.",

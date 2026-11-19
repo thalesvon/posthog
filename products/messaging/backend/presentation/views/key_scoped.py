@@ -68,6 +68,10 @@ class KeyScopedMessagingSendViewSet(MessagingSendViewSet):
         if self.action == "email_batch":
             with transactional_email_stage("feature_flag"):
                 require_email_batch_sends(self.team)
+                if not isinstance(request.data, UnreadBody):
+                    (require_email_from_code if _takes_template_key(request.data) else require_transactional_email_api)(
+                        self.team
+                    )
         super().check_throttles(request)
 
     def refuse_body_over_the_cap(self) -> APIException:
@@ -108,8 +112,7 @@ class KeyScopedMessagingSendViewSet(MessagingSendViewSet):
             raise RequestDataTooBig()
         if isinstance(request.data, UnreadBody):
             raise request.data.refusal
-        takes_template_key = isinstance(request.data, Mapping) and "template_key" in request.data
-        (require_email_from_code if takes_template_key else require_transactional_email_api)(self.team)
+        takes_template_key = _takes_template_key(request.data)
         if refusal := refused_batch_field(request.data, takes_template_key=takes_template_key):
             raise refusal
         serializer = SendEmailBatchSerializer(data=request.data)
@@ -163,3 +166,7 @@ class KeyScopedMessagingEmailsViewSet(MessagingEmailsViewSet):
 
 class KeyScopedTopicPreferencesViewSet(TopicPreferencesViewSet):
     team_from_project_secret_api_key = True
+
+
+def _takes_template_key(data: Any) -> bool:
+    return isinstance(data, Mapping) and "template_key" in data

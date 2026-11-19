@@ -669,7 +669,7 @@ class TestTransactionalEmailBatch(APIBaseTest):
 
         assert response.status_code == status.HTTP_503_SERVICE_UNAVAILABLE, response.json()
         assert response.json()["code"] == "delivery_unavailable"
-        assert "queued none of the batch's emails" in response.json()["detail"]
+        assert "turned this batch away" in response.json()["detail"]
         assert "may still go out" not in response.json()["detail"]
         assert [call.kwargs["properties"]["outcome"] for call in capture.call_args_list] == ["not_admitted"]
 
@@ -798,8 +798,11 @@ class TestTransactionalEmailBatch(APIBaseTest):
         assert TransactionalEmailKey.objects.for_team(self.team.id, canonical=True).count() == keys
         mock_post.assert_not_called()
 
-    def test_a_batch_while_its_flag_is_off_spends_no_send(self, mock_post, flag, _capture):
-        flag.side_effect = lambda key, *_args, **_kwargs: key != EMAIL_BATCH_FLAG
+    @parameterized.expand(
+        [("batch_flag_off", EMAIL_BATCH_FLAG, "template"), ("code_flag_off", EMAIL_FROM_CODE_FLAG, "code")]
+    )
+    def test_a_batch_while_its_flag_is_off_spends_no_send(self, mock_post, flag, _capture, _name, flag_off, form):
+        flag.side_effect = lambda key, *_args, **_kwargs: key != flag_off
         mock_post.return_value = MagicMock(status_code=202, json=lambda: {"invocation_id": "single"})
         rate_limit.is_rate_limit_enabled.cache_clear()
         rate_limit.get_team_allow_list.cache_clear()
@@ -810,9 +813,9 @@ class TestTransactionalEmailBatch(APIBaseTest):
             override_instance_config("RATE_LIMIT_ENABLED", True),
             patch.object(TransactionalEmailTeamBurstThrottle, "rate", "1/minute"),
         ):
-            hidden = self._batch("template")
+            hidden = self._batch(form)
             single = self._single("template")
-            hidden_past_the_budget = self._batch("template")
+            hidden_past_the_budget = self._batch(form)
 
         assert hidden.status_code == status.HTTP_404_NOT_FOUND
         assert single.status_code == status.HTTP_202_ACCEPTED, single.json()
