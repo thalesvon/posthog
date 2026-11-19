@@ -4,10 +4,12 @@ from collections.abc import Mapping
 from typing import Any
 from uuid import uuid4
 
+from django.core.exceptions import RequestDataTooBig
+
 from drf_spectacular.utils import extend_schema
 from rest_framework import status
 from rest_framework.decorators import action
-from rest_framework.exceptions import UnsupportedMediaType
+from rest_framework.exceptions import APIException, NotFound, UnsupportedMediaType
 from rest_framework.parsers import JSONParser
 from rest_framework.response import Response
 
@@ -45,6 +47,7 @@ from products.messaging.backend.presentation.views.message_templates import (
     require_transactional_email_api,
     transactional_email_throttles,
 )
+from products.messaging.backend.presentation.views.refusals import ExplainedRefusal
 from products.messaging.backend.presentation.views.topic_preferences import TopicPreferencesViewSet
 from products.messaging.backend.presentation.views.transactional_email_status import MessagingEmailsViewSet
 
@@ -53,6 +56,18 @@ class KeyScopedMessagingSendViewSet(MessagingSendViewSet):
     team_from_project_secret_api_key = True
     psak_allowed_actions = ["email", "email_batch"]
     transactional_email_send_actions = ("email", "email_batch")
+
+    def body_too_large(self) -> ExplainedRefusal:
+        return batch_body_too_large() if self.action == "email_batch" else super().body_too_large()
+
+    def refuse_body_over_the_cap(self) -> APIException:
+        refusal = super().refuse_body_over_the_cap()
+        if self.action == "email_batch" and isinstance(refusal, ExplainedRefusal):
+            try:
+                require_email_batch_sends(self.team)
+            except NotFound as hidden:
+                return hidden
+        return refusal
 
     @extend_schema(
         request=SendEmailBatchSerializer,
@@ -79,7 +94,7 @@ class KeyScopedMessagingSendViewSet(MessagingSendViewSet):
         if request.content_type.split(";")[0].strip().lower() != JSONParser.media_type:
             raise UnsupportedMediaType(request.content_type)
         if len(request.body) > BATCH_BODY_MAX_BYTES:
-            raise batch_body_too_large()
+            raise RequestDataTooBig()
         takes_template_key = isinstance(request.data, Mapping) and "template_key" in request.data
         (require_email_from_code if takes_template_key else require_transactional_email_api)(self.team)
         if refusal := refused_batch_field(request.data, takes_template_key=takes_template_key):

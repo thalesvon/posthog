@@ -6,6 +6,7 @@ from posthog.test.base import APIBaseTest
 from unittest.mock import MagicMock, patch
 
 from django.core.cache import cache
+from django.test import override_settings
 
 import requests
 from parameterized import parameterized
@@ -289,7 +290,6 @@ class TestTransactionalEmailBatch(APIBaseTest):
             ),
             ("shared_data_over_256_kib", "template", {"message_data": {"blob": "x" * 256 * 1024}}, 400, None),
             ("shared_content_over_256_kib", "code", {"html": "<p>" + "x" * 256 * 1024 + "</p>"}, 400, None),
-            ("body_over_5_mib", "template", {"message_data": {"blob": "x" * 5 * 1024 * 1024}}, 413, None),
             (
                 "body_over_5_mib_with_a_refused_field",
                 "template",
@@ -306,6 +306,28 @@ class TestTransactionalEmailBatch(APIBaseTest):
 
         assert response.status_code == expected_status, response.json()
         assert response.json()["attr"] == attr
+        mock_post.assert_not_called()
+
+    @parameterized.expand(
+        [
+            ("over_the_batch_cap", 5 * 1024 * 1024, 20 * 1024 * 1024),
+            ("over_the_django_upload_ceiling", 2 * 1024 * 1024, 1024 * 1024),
+        ]
+    )
+    def test_refuses_an_oversized_batch_without_reading_its_body(
+        self, mock_post, _flag, capture, _name, blob_bytes, upload_ceiling
+    ):
+        with override_settings(DATA_UPLOAD_MAX_MEMORY_SIZE=upload_ceiling):
+            response = self._batch("template", message_data={"blob": "x" * blob_bytes})
+
+        assert response.status_code == status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, response.json()
+        assert response.json()["code"] == "content_too_large"
+        refused = capture.call_args.kwargs["properties"]
+        assert (refused["outcome"], refused["attachment_count"], refused["attachment_bytes"]) == (
+            "rejected",
+            None,
+            None,
+        )
         mock_post.assert_not_called()
 
     @parameterized.expand(
@@ -499,6 +521,7 @@ class TestTransactionalEmailBatch(APIBaseTest):
         [
             ("batch_flag_off", "template", {TRANSACTIONAL_EMAIL_API_FLAG, EMAIL_FROM_CODE_FLAG}),
             ("batch_flag_off_form_encoded", "form", {TRANSACTIONAL_EMAIL_API_FLAG, EMAIL_FROM_CODE_FLAG}),
+            ("batch_flag_off_over_the_upload_ceiling", "huge", {TRANSACTIONAL_EMAIL_API_FLAG, EMAIL_FROM_CODE_FLAG}),
             ("template_flag_off", "template", {EMAIL_BATCH_FLAG, EMAIL_FROM_CODE_FLAG}),
             ("code_flag_off", "code", {EMAIL_BATCH_FLAG, TRANSACTIONAL_EMAIL_API_FLAG}),
         ]
@@ -506,7 +529,13 @@ class TestTransactionalEmailBatch(APIBaseTest):
     def test_is_hidden_while_a_flag_it_needs_is_off(self, mock_post, flag, _capture, _name, form, enabled_flags):
         flag.side_effect = lambda key, *_args, **_kwargs: key in enabled_flags
 
-        response = self._form_encoded_batch() if form == "form" else self._batch(form)
+        with override_settings(DATA_UPLOAD_MAX_MEMORY_SIZE=1024 * 1024):
+            if form == "form":
+                response = self._form_encoded_batch()
+            elif form == "huge":
+                response = self._batch("template", message_data={"blob": "x" * 2 * 1024 * 1024})
+            else:
+                response = self._batch(form)
 
         assert response.status_code == status.HTTP_404_NOT_FOUND
         mock_post.assert_not_called()
