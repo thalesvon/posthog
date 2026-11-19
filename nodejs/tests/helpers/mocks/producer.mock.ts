@@ -52,7 +52,6 @@ export const mockProducerObserver = new KafkaProducerObserver(mockProducer)
 
 const mockBroker = require('~/common/kafka/producer')._broker as { produce: jest.Mock }
 
-// Returns the values the broker got on `topic` since this call.
 export const kafkaRecordsOn = (topic: string): (() => Buffer[]) => {
     const from = mockBroker.produce.mock.calls.length
     return () =>

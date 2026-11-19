@@ -5626,8 +5626,8 @@ describe('CDP API', () => {
                         expect(intakeRecords.map((message) => message.job.id).sort()).toEqual(
                             produces ? runIds.sort() : []
                         )
-                        expect(intakeRecords.map((message) => message.teamId)).toEqual(
-                            produces ? [team.id, team.id] : []
+                        expect(intakeRecords.map(({ kind, teamId }) => ({ kind, teamId }))).toEqual(
+                            produces ? Array(2).fill({ kind: 'transactional-email', teamId: team.id }) : []
                         )
                     } finally {
                         api['config'].CDP_INTAKE_KAFKA_SHADOW_TEAMS = ''

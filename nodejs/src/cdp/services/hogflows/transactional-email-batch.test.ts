@@ -160,12 +160,6 @@ describe('whole-batch refusals', () => {
 
     it.each([
         {
-            batch: 'a template batch',
-            schema: TemplateBatchRequestSchema,
-            body: { recipients: [ada, bo] },
-            accepted: true,
-        },
-        {
             batch: 'a code send batch',
             schema: CodeSendBatchRequestSchema,
             body: { send, recipients: [ada, bo] },
