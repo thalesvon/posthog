@@ -157,8 +157,7 @@ export const readBatchBody = (
         const received = (chunk: Buffer): void => {
             chunks.push(chunk)
         }
-        // The abort timer can run after the last chunk even when the deadline has passed, so the read checks the clock
-        // before it parses and again once the parse is done.
+        // The abort timer can run after the last chunk even when the deadline has passed, so the read checks the clock.
         const ended = (): void => {
             if (deadlineError(deadline) !== undefined) {
                 return end({ read: 'deadline_exceeded' })
