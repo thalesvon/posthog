@@ -1,3 +1,5 @@
+import uuid
+
 import pytest
 from posthog.test.base import APIBaseTest
 from unittest.mock import MagicMock, patch
@@ -6,6 +8,7 @@ from django.contrib import auth
 from django.test import override_settings
 
 from rest_framework import status
+from social_django.models import Partial
 
 from posthog.models import Organization, User
 
@@ -92,6 +95,12 @@ class TestDemoSignupAPI(APIBaseTest):
         # Simulate SSO process started
         session = self.client.session
         session.update({"backend": "google-oauth2", "email": "charlie@tech-r-us.com"})
+        partial = Partial.objects.create(
+            token=uuid.uuid4().hex,
+            backend=session["backend"],
+            data={"kwargs": {"details": {"email": session["email"]}}},
+        )
+        session["partial_pipeline_token"] = partial.token
         session.save()
 
         # Staff sign up for demo securely via Google, which should grant is_staff privileges
@@ -132,6 +141,12 @@ class TestDemoSignupAPI(APIBaseTest):
         # Simulate SSO process started
         session = self.client.session
         session.update({"backend": "google-oauth2", "email": "charlie@tech-r-us.com"})
+        partial = Partial.objects.create(
+            token=uuid.uuid4().hex,
+            backend=session["backend"],
+            data={"kwargs": {"details": {"email": session["email"]}}},
+        )
+        session["partial_pipeline_token"] = partial.token
         session.save()
 
         # Staff log into demo securely via Google, which should grant is_staff privileges
