@@ -12,7 +12,7 @@ The legacy entries move to v1 soon after that release. Update this list and the 
 | Node push subscription person updates      | [`push-capture.ts`](../../../../nodejs/src/messaging/push-subscriptions/push-capture.ts)                                               | `/i/v1/analytics/events`                                            |
 | Batch imports                              | [`batch-import-worker/src/emit/capture.rs`](../../../../rust/batch-import-worker/src/emit/capture.rs)                                  | `/i/v1/analytics/events`                                            |
 | Rust services' own telemetry               | `posthog` 1.x (posthog-rs) in [`rust/Cargo.toml`](../../../../rust/Cargo.toml)                                                         | `/i/v1/*`                                                           |
-| PostHog CLI                                | `posthog` 1.x (posthog-rs) in [`cli/Cargo.toml`](../../../../cli/Cargo.toml)                                                           | `/i/v1/analytics/events`                                            |
+| PostHog CLI                                | `posthog` 1.x (posthog-rs) in [`cli/Cargo.toml`](../../../../cli/Cargo.toml), from CLI 0.20.1 (older builds send to legacy capture)    | `/i/v1/analytics/events`                                            |
 
 To find the Django call sites, search for `capture_internal(`, `capture_batch_internal(` and `capture_ai_internal(`.
 
