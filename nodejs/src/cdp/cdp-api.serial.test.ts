@@ -22,7 +22,7 @@ import supertest from 'supertest'
 import express from 'ultimate-express'
 import { version as uuidVersion } from 'uuid'
 
-import { keyedRunId } from '~/cdp/intake/run-intake'
+import { ASYNC_RECALL_BUDGET_MS, keyedRunId } from '~/cdp/intake/run-intake'
 import { CyclotronInputType } from '~/cdp/schema/cyclotron'
 import { HogFlow } from '~/cdp/schema/hogflow'
 import { EncryptedFields } from '~/cdp/utils/encryption-utils'
@@ -5861,13 +5861,19 @@ describe('CDP API', () => {
                     databaseUrl: string | undefined,
                     table: string,
                     work: () => Promise<T>
-                ): Promise<T> => {
+                ): Promise<{ result: T; blockedQueries: number }> => {
                     const locking = new Pool({ connectionString: databaseUrl, max: 1 })
                     const client = await locking.connect()
                     try {
                         await client.query('BEGIN')
                         await client.query(`LOCK TABLE ${table} IN ACCESS EXCLUSIVE MODE`)
-                        return await work()
+                        const result = await work()
+                        const { rows } = await client.query(
+                            `SELECT count(*)::int AS blocked FROM pg_stat_activity
+                             WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE $1`,
+                            [`%${table}%`]
+                        )
+                        return { result, blockedQueries: rows[0].blocked }
                     } finally {
                         await client.query('ROLLBACK')
                         client.release()
@@ -5876,23 +5882,45 @@ describe('CDP API', () => {
                 }
 
                 it.each([
-                    // The pod's own workflows config cache is cold, so the suspension check reads the locked table.
-                    ['its checks stall', () => hub.DATABASE_URL, 'workflows_teamworkflowsconfig', 500],
-                    // The deadline is shorter than the claim recall's own budget, so it ends while the recall waits.
-                    ['its claim read stalls', () => hub.CYCLOTRON_NODE_DATABASE_URL, 'cyclotron_jobs', 200],
+                    // The pod's own workflows config cache stays cold, so the suspension check reads the locked table.
+                    {
+                        stall: 'its checks stall',
+                        databaseUrl: () => hub.DATABASE_URL,
+                        table: 'workflows_teamworkflowsconfig',
+                        deadlineMs: 500,
+                        warm: false,
+                        answersWithin: ASYNC_REFUSAL_BUDGET_MS,
+                    },
+                    // A warm pod finishes its checks well inside the deadline, which ends while the claim read waits.
+                    {
+                        stall: 'its claim read stalls',
+                        databaseUrl: () => hub.CYCLOTRON_NODE_DATABASE_URL,
+                        table: 'cyclotron_idempotency_keys',
+                        deadlineMs: 100,
+                        warm: true,
+                        answersWithin: ASYNC_RECALL_BUDGET_MS,
+                    },
                 ])(
-                    'refuses a batch at its deadline and publishes none of it when %s',
-                    async (_stall, databaseUrl, table, deadlineMs) => {
+                    'refuses a batch at its deadline and publishes none of it when $stall',
+                    async ({ databaseUrl, table, deadlineMs, warm, answersWithin }) => {
                         const { app: own } = await servedWith({ CDP_TRANSACTIONAL_EMAIL_BATCH_DEADLINE_MS: deadlineMs })
+                        if (warm) {
+                            expect(
+                                (await sendBatchTo(own, TEMPLATE, batchOf(recipient('warm@example.com')))).status
+                            ).toEqual(200)
+                        }
+                        const stalled = recipient('ada@example.com')
 
                         const started = Date.now()
-                        const res = await whileLocked(databaseUrl(), table, () =>
-                            sendBatchTo(own, TEMPLATE, batchOf(recipient('ada@example.com')))
+                        const { result: res, blockedQueries } = await whileLocked(databaseUrl(), table, () =>
+                            sendBatchTo(own, TEMPLATE, batchOf(stalled))
                         )
+                        const answeredAfterMs = Date.now() - started
 
                         expect([res.status, res.body]).toEqual([503, { error: 'deadline_exceeded' }])
-                        expect(Date.now() - started).toBeLessThan(ASYNC_REFUSAL_BUDGET_MS)
-                        expect(publishedTo()).toEqual([])
+                        expect(blockedQueries).toBeGreaterThan(0)
+                        expect(answeredAfterMs).toBeLessThan(answersWithin)
+                        expect(publishedTo()).not.toContain(stalled.distinct_id)
                     }
                 )
 

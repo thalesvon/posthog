@@ -61,7 +61,6 @@ export const kafkaRecordsOn = (topic: string): (() => Buffer[]) => {
             .map(([, , value]) => value as Buffer)
 }
 
-// `releaseOne()` acks the oldest held record. `release()` acks every held record and makes the broker ack at once again.
 export const holdKafkaAcks = (topic: string): { releaseOne: () => void; release: () => void } => {
     const deliver = mockBroker.produce.getMockImplementation()!
     const held: (() => void)[] = []

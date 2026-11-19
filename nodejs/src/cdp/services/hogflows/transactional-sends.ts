@@ -16,6 +16,7 @@ import {
     HogFunctionInvocationGlobals,
     IntegrationType,
 } from '../../types'
+import { deadlineError } from '../../utils/deadline'
 import { EncryptedFields } from '../../utils/encryption-utils'
 import { convertToHogFunctionFilterGlobal } from '../../utils/hog-function-filtering'
 import { createCanceledInvocationResult } from '../../utils/invocation-utils'
@@ -634,12 +635,15 @@ export class TransactionalSends {
             return { request, invocation, fingerprint }
         })
         stages.start('idempotency')
-        const recalled = await this.deps.runIntake.recallAllWithin(
-            runs.map(({ invocation, fingerprint }) => ({ runId: invocation.id, fingerprint: fingerprint.current })),
-            'transactional-email'
+        const recalled = await withinDeadline(
+            this.deps.runIntake.recallAllWithin(
+                runs.map(({ invocation, fingerprint }) => ({ runId: invocation.id, fingerprint: fingerprint.current })),
+                'transactional-email'
+            ),
+            deadline
         )
-        // The recall has a budget of its own that can end after the request deadline.
-        if (deadline.aborted) {
+        // A stalled event loop can run a finished lookup before the deadline's abort timer, so read the clock as well.
+        if (recalled === 'deadline_exceeded' || deadlineError(deadline) !== undefined) {
             return { refused: 'deadline_exceeded' }
         }
 
