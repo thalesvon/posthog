@@ -47,7 +47,8 @@ const CUSTOM_PERSON_ID = 'custom'
 
 /** The event that starts the workflow, with its property filters, so previews read an event that would have. */
 export interface PreviewTrigger {
-    event: string
+    /** Null for a trigger on any event. */
+    event: string | null
     properties: AnyPropertyFilter[]
 }
 
@@ -211,15 +212,10 @@ export interface emailPreviewPersonLogicMeta {
         ) => PreviewPerson | null
         previewPerson: (
             chosenPerson: PreviewPerson | null,
-            personEvent:
-                | {
-                      properties: Record<string, any>
-                  }
-                | null
-                | undefined,
+            personEvent: SourcedEvent | null,
             personEventSource: string
         ) => PreviewPerson | null
-        personEventSource: (trigger: any, chosenPerson: PreviewPerson | null) => string
+        personEventSource: (trigger: PreviewTrigger | null, chosenPerson: PreviewPerson | null) => string
     }
 }
 
